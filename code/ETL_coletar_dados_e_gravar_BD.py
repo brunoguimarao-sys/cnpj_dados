@@ -72,14 +72,18 @@ def getEnv(env):
     return os.getenv(env)
 
 
-current_path = pathlib.Path().resolve()
-dotenv_path = os.path.join(current_path, '.env')
+# O script deve procurar o .env na mesma pasta em que ele está (a pasta 'code')
+script_dir = pathlib.Path(__file__).parent.resolve()
+dotenv_path = os.path.join(script_dir, '.env')
+
+# Se o .env não for encontrado, o script para e avisa o usuário.
 if not os.path.isfile(dotenv_path):
-    print('Especifique o local do seu arquivo de configuração ".env". Por exemplo: C:\...\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code')
-    # C:\Aphonso_C\Git\Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ\code
-    local_env = input()
-    dotenv_path = os.path.join(local_env, '.env')
-print(dotenv_path)
+    print(f"ERRO: Arquivo de configuração '.env' não encontrado em '{script_dir}'.")
+    print(r"Por favor, copie o arquivo '.env_template' para '.env' e preencha suas configurações.")
+    print(r"Você pode usar os scripts 'setup.sh' ou 'setup.bat' para criar o arquivo automaticamente.")
+    sys.exit(1)
+
+print(f"Carregando configurações de: {dotenv_path}")
 load_dotenv(dotenv_path=dotenv_path)
 
 dados_rf = getEnv('DADOS_RF_URL')
