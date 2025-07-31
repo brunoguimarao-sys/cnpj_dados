@@ -171,14 +171,22 @@ def get_zip_files_from_url(data_url):
 #%%
 # --- Lógica de Descoberta de Arquivos ---
 try:
-    latest_data_url = get_latest_data_url(dados_rf)
-    Files = get_zip_files_from_url(latest_data_url)
-    # A URL base para download passa a ser a do diretório de dados mais recente
-    dados_rf = latest_data_url
-except urllib.error.URLError:
-    # A função urlopen_with_retry já imprimiu o erro detalhado.
-    # Apenas encerramos o script.
-    sys.exit(1)
+    # Primeiro, tenta obter a lista de zips da URL base fornecida
+    Files = get_zip_files_from_url(dados_rf)
+    print("Arquivos .zip encontrados diretamente na URL base.")
+except (urllib.error.URLError, SystemExit) as e:
+    # Se falhar ou não encontrar zips, assume que é um diretório pai
+    # e tenta encontrar o subdiretório mais recente.
+    print("Nenhum arquivo .zip encontrado na URL base, procurando por subdiretórios...")
+    try:
+        latest_data_url = get_latest_data_url(dados_rf)
+        Files = get_zip_files_from_url(latest_data_url)
+        # A URL base para download passa a ser a do diretório de dados mais recente
+        dados_rf = latest_data_url
+    except (urllib.error.URLError, SystemExit):
+        # A função urlopen_with_retry já imprimiu o erro detalhado.
+        # Apenas encerramos o script.
+        sys.exit(1)
 
 print('Arquivos que serão baixados:')
 i_f = 0
