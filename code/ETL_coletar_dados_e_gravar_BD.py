@@ -138,14 +138,15 @@ def get_latest_data_url(base_url):
     raw_html = response.read()
     page = bs.BeautifulSoup(raw_html, 'lxml')
 
-    # Encontra todos os links que parecem ser diretórios (terminam com /)
-    dir_links = [a['href'] for a in page.find_all('a') if a['href'].endswith('/') and a['href'] != '../']
+    # Filtra os links para encontrar apenas diretórios que seguem o padrão YYYY-MM/
+    date_pattern = re.compile(r'^\d{4}-\d{2}/$')
+    dir_links = [a['href'] for a in page.find_all('a') if date_pattern.match(a['href'])]
 
     if not dir_links:
-        print("ERRO: Nenhum diretório de dados encontrado na URL base.")
+        print("ERRO: Nenhum diretório de dados no formato AAAA-MM/ foi encontrado na URL base.")
         sys.exit(1)
 
-    # Assume que o último link é o mais recente (geralmente ordenado)
+    # Ordena os diretórios e pega o mais recente
     latest_dir = sorted(dir_links)[-1]
     latest_data_url = urllib.parse.urljoin(base_url, latest_dir)
     print(f"Diretório de dados mais recente encontrado: {latest_data_url}")
