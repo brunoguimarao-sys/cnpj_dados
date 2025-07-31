@@ -1,59 +1,87 @@
-# Dados Públicos CNPJ
-- Fonte oficial da Receita Federal do Brasil, [aqui](https://dados.gov.br/dados/conjuntos-dados/cadastro-nacional-da-pessoa-juridica---cnpj).
-- Layout dos arquivos, [aqui](https://www.gov.br/receitafederal/dados/cnpj-metadados.pdf).
+# Dados Públicos CNPJ da Receita Federal
 
-A Receita Federal do Brasil disponibiliza bases com os dados públicos do cadastro nacional de pessoas jurídicas (CNPJ).
+Este repositório contém um pipeline de ETL (Extract, Transform, Load) para baixar, descompactar, tratar e inserir os dados públicos de CNPJ da Receita Federal do Brasil em um banco de dados PostgreSQL.
 
-De forma geral, nelas constam as mesmas informações que conseguimos ver no cartão do CNPJ, quando fazemos uma consulta individual, acrescidas de outros dados de Simples Nacional, sócios e etc. Análises muito ricas podem sair desses dados, desde econômicas, mercadológicas até investigações.
+O processo é projetado para ser robusto e performático, mesmo lidando com dezenas de gigabytes de dados.
 
-Nesse repositório consta um processo de ETL para **i)** baixar os arquivos; **ii)** descompactar; **iii)** ler, tratar e **iv)** inserir num banco de dados relacional PostgreSQL.
+- **Fonte Oficial dos Dados:** [Cadastro Nacional da Pessoa Jurídica - CNPJ](https://dados.gov.br/dados/conjuntos-dados/cadastro-nacional-da-pessoa-juridica---cnpj)
+- **Layout dos Arquivos:** [Metadados CNPJ](https://www.gov.br/receitafederal/dados/cnpj-metadados.pdf)
 
----------------------
+---
 
-### Infraestrutura necessária:
-- [Python 3.8](https://www.python.org/downloads/release/python-3810/)
-- [PostgreSQL 14.2](https://www.postgresql.org/download/)
+### Melhorias Recentes
+Esta versão do projeto inclui as seguintes melhorias:
+- **Performance Acelerada:** A inserção de dados no banco de dados foi otimizada em ordens de magnitude, trocando a abordagem linha a linha por um carregamento em massa (`bulk-loading`).
+- **Uso de Memória Reduzido:** O processamento de arquivos grandes agora é feito em pedaços (`chunks`), permitindo que o ETL rode em máquinas com menos recursos de RAM.
+- **Tratamento de Erros Aprimorado:** O script agora detecta arquivos corrompidos durante a descompactação e reporta o erro, em vez de falhar silenciosamente.
+- **Configuração Simplificada:** A URL de download dos dados foi movida para o arquivo de configuração, facilitando futuras atualizações.
 
----------------------
+---
 
-### How to use:
-1. Com o Postgres instalado, inicie a instância do servidor (pode ser local) e crie o banco de dados conforme o arquivo `banco_de_dados.sql`.
+### Infraestrutura Necessária
+- [Python 3.8+](https://www.python.org/downloads/)
+- [PostgreSQL 14+](https://www.postgresql.org/download/)
 
-2. Crie um arquivo `.env` no diretório `code`, conforme as variáveis de ambiente do seu ambiente de trabalho (localhost). Utilize como referência o arquivo `.env_template`. Você pode também, por exemplo, renomear o arquivo de `.env_template` para apenas `.env` e então utilizá-lo:
-   - `OUTPUT_FILES_PATH`: diretório de destino para o donwload dos arquivos
-   - `EXTRACTED_FILES_PATH`: diretório de destino para a extração dos arquivos .zip
-   - `DB_USER`: usuário do banco de dados criado pelo arquivo `banco_de_dados.sql`
-   - `DB_PASSWORD`: senha do usuário do BD
-   - `DB_HOST`: host da conexão com o BD
-   - `DB_PORT`: porta da conexão com o BD
-   - `DB_NAME`: nome da base de dados na instância (`Dados_RFB` - conforme arquivo `banco_de_dados.sql`)
+---
 
-3. Instale as bibliotecas necessárias, disponíveis em `requirements.txt`:
-```
-pip install -r requirements.txt
-```
+### Como Usar
 
-4. Execute o arquivo `ETL_coletar_dados_e_gravar_BD.py` e aguarde a finalização do processo.
-   - Os arquivos são grandes. Dependendo da infraestrutura isso deve levar muitas horas para conclusão.
-   - Arquivos de 08/05/2021: `4,68 GB` compactados e `17,1 GB` descompactados.
+#### 1. Configuração do Banco de Dados
+- Com o PostgreSQL instalado e rodando, crie a base de dados que será usada pelo projeto. O script original sugere o nome `Dados_RFB`, que pode ser criado com o comando abaixo:
+  ```sql
+  CREATE DATABASE "Dados_RFB" WITH OWNER = postgres ENCODING = 'UTF8';
+  ```
 
----------------------
+#### 2. Configuração do Ambiente
+- Navegue até a pasta `code` e renomeie o arquivo `.env_template` para `.env`.
+- Abra o arquivo `.env` e preencha as variáveis com as suas configurações locais (caminhos de pasta e credenciais do banco de dados).
 
-### Tabelas geradas:
-- Para maiores informações, consulte o [layout](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/cadastros/consultas/arquivos/NOVOLAYOUTDOSDADOSABERTOSDOCNPJ.pdf).
-  - `empresa`: dados cadastrais da empresa em nível de matriz
-  - `estabelecimento`: dados analíticos da empresa por unidade / estabelecimento (telefones, endereço, filial, etc)
-  - `socios`: dados cadastrais dos sócios das empresas
-  - `simples`: dados de MEI e Simples Nacional
-  - `cnae`: código e descrição dos CNAEs
-  - `quals`: tabela de qualificação das pessoas físicas - sócios, responsável e representante legal.
-  - `natju`: tabela de naturezas jurídicas - código e descrição.
-  - `moti`: tabela de motivos da situação cadastral - código e descrição.
-  - `pais`: tabela de países - código e descrição.
-  - `munic`: tabela de municípios - código e descrição.
+  ```dotenv
+  # Caminho para armazenar os arquivos .zip baixados
+  OUTPUT_FILES_PATH=C:\temp\dados_rfb\output
+  # Caminho para armazenar os arquivos extraídos
+  EXTRACTED_FILES_PATH=C:\temp\dados_rfb\extracted
 
+  # URL de onde os dados serão baixados (geralmente não precisa mudar)
+  DADOS_RF_URL=http://200.152.38.155/CNPJ/
 
-- Pelo volume de dados, as tabelas  `empresa`, `estabelecimento`, `socios` e `simples` possuem índices para a coluna `cnpj_basico`, que é a principal chave de ligação entre elas.
+  # Credenciais do seu banco de dados PostgreSQL
+  DB_HOST=localhost
+  DB_PORT=5432
+  DB_USER=postgres
+  DB_PASSWORD=sua_senha_secreta
+  DB_NAME=Dados_RFB
+  ```
 
-### Modelo de Entidade Relacionamento:
+#### 3. Instalação das Dependências
+- Instale todas as bibliotecas Python necessárias com um único comando:
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+#### 4. Execução do Pipeline
+- Execute o script principal de ETL e aguarde a finalização.
+  ```bash
+  python code/ETL_coletar_dados_e_gravar_BD.py
+  ```
+- **Atenção:** O processo é longo e pode levar várias horas, dependendo da sua conexão com a internet e da performance do seu computador. O volume de dados é de aproximadamente 5 GB compactados e mais de 17 GB descompactados.
+
+---
+
+### Tabelas Geradas
+O processo de ETL criará e populará as seguintes tabelas no seu banco de dados:
+- `empresa`: Dados cadastrais da empresa em nível de matriz.
+- `estabelecimento`: Dados analíticos por unidade/estabelecimento (endereço, telefones, etc.).
+- `socios`: Dados cadastrais dos sócios das empresas.
+- `simples`: Informações sobre MEI e Simples Nacional.
+- `cnae`: Tabela de códigos e descrições de atividades econômicas.
+- `quals`: Tabela de qualificação dos sócios e responsáveis.
+- `natju`: Tabela de naturezas jurídicas.
+- `moti`: Tabela de motivos da situação cadastral.
+- `pais`: Tabela de países.
+- `munic`: Tabela de municípios.
+
+Para otimizar consultas, as tabelas principais (`empresa`, `estabelecimento`, `socios`, `simples`) são indexadas pela coluna `cnpj_basico`.
+
+### Modelo de Entidade e Relacionamento
 ![alt text](https://github.com/aphonsoar/Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ/blob/master/Dados_RFB_ERD.png)
