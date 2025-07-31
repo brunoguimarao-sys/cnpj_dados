@@ -1,8 +1,8 @@
 import datetime
 import gc
+import io
 import pathlib
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 import bs4 as bs
 import ftplib
 import gzip
@@ -44,25 +44,27 @@ def makedirs(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-#%%
-def to_sql(dataframe, **kwargs):
-    '''
-    Quebra em pedacos a tarefa de inserir registros no banco
-    '''
-    size = 4096  #TODO param
-    total = len(dataframe)
-    name = kwargs.get('name')
+def copy_from_stringio(cursor, df, table_name):
+    """
+    Usa o método copy_from do psycopg2 para inserir um dataframe do pandas
+    em uma tabela do banco de dados de forma muito mais rápida.
+    """
+    # Salva o dataframe em um buffer na memória
+    buffer = io.StringIO()
+    # NaN é convertido para string vazia, que será tratada como NULL pelo copy_from
+    df.to_csv(buffer, sep=';', header=False, index=False, na_rep='')
+    buffer.seek(0) # "rebobina" o buffer para o início
 
-    def chunker(df):
-        return (df[i:i + size] for i in range(0, len(df), size))
-
-    for i, df in enumerate(chunker(dataframe)):
-        df.to_sql(**kwargs)
-        index = i * size
-        percent = (index * 100) / total
-        progress = f'{name} {percent:.2f}% {index:0{len(str(total))}}/{total}'
-        sys.stdout.write(f'\r{progress}')
-    sys.stdout.write('\n')
+    try:
+        # Insere os dados no banco
+        # O parâmetro null='' garante que strings vazias sejam convertidas para NULL no BD
+        cursor.copy_from(buffer, table_name, sep=';', null='')
+        conn.commit()
+    except (Exception, psycopg2.DatabaseError) as error:
+        print(f"\nErro ao inserir dados na tabela {table_name}: {error}")
+        conn.rollback()
+        # Opcional: Sair do script se houver erro
+        # sys.exit(1)
 
 #%%
 # Ler arquivo de configuração de ambiente # https://dev.to/jakewitcher/using-env-files-for-environment-variables-in-python-applications-55a1
@@ -80,7 +82,7 @@ if not os.path.isfile(dotenv_path):
 print(dotenv_path)
 load_dotenv(dotenv_path=dotenv_path)
 
-dados_rf = 'http://200.152.38.155/CNPJ/'
+dados_rf = getEnv('DADOS_RF_URL')
 
 #%%
 # Read details from ".env" file:
@@ -93,12 +95,16 @@ try:
     extracted_files = getEnv('EXTRACTED_FILES_PATH')
     makedirs(extracted_files)
 
+    if not dados_rf:
+        raise ValueError('A variável DADOS_RF_URL não foi definida no arquivo .env')
+
     print('Diretórios definidos: \n' +
           'output_files: ' + str(output_files)  + '\n' +
           'extracted_files: ' + str(extracted_files))
-except:
-    pass
-    print('Erro na definição dos diretórios, verifique o arquivo ".env" ou o local informado do seu arquivo de configuração.')
+    print(f'URL dos dados: {dados_rf}')
+except Exception as e:
+    print(f'Erro na definição das variáveis de ambiente: {e}, verifique o arquivo ".env" ou o local informado do seu arquivo de configuração.')
+    sys.exit(1)
 
 #%%
 raw_html = urllib.request.urlopen(dados_rf)
@@ -173,15 +179,16 @@ for l in Files:
 # Extracting files:
 i_l = 0
 for l in Files:
+    i_l += 1
+    print(f'Descompactando arquivo: {i_l} - {l}')
+    full_path = os.path.join(output_files, l)
     try:
-        i_l += 1
-        print('Descompactando arquivo:')
-        print(str(i_l) + ' - ' + l)
-        full_path = os.path.join(output_files, l)
         with zipfile.ZipFile(full_path, 'r') as zip_ref:
             zip_ref.extractall(extracted_files)
-    except:
-        pass
+    except zipfile.BadZipFile:
+        print(f"AVISO: O arquivo {l} não é um arquivo zip válido ou está corrompido. O arquivo será ignorado.")
+    except Exception as e:
+        print(f"AVISO: Ocorreu um erro inesperado ao descompactar o arquivo {l}: {e}. O arquivo será ignorado.")
 
 #%%
 ########################################################################################################################
@@ -237,7 +244,6 @@ port=getEnv('DB_PORT')
 database=getEnv('DB_NAME')
 
 # Conectar:
-engine = create_engine('postgresql://'+user+':'+passw+'@'+host+':'+port+'/'+database)
 conn = psycopg2.connect('dbname='+database+' '+'user='+user+' '+'host='+host+' '+'port='+port+' '+'password='+passw)
 cur = conn.cursor()
 
@@ -254,46 +260,36 @@ print("""
 cur.execute('DROP TABLE IF EXISTS "empresa";')
 conn.commit()
 
+CHUNKSIZE = 1_000_000
+empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
+empresa_cols = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
+
 for e in range(0, len(arquivos_empresa)):
     print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
-    try:
-        del empresa
-    except:
-        pass
-
-    #empresa = pd.DataFrame(columns=[0, 1, 2, 3, 4, 5, 6])
-    empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
     extracted_file_path = os.path.join(extracted_files, arquivos_empresa[e])
 
-    empresa = pd.read_csv(filepath_or_buffer=extracted_file_path,
+    reader = pd.read_csv(filepath_or_buffer=extracted_file_path,
                           sep=';',
-                          #nrows=100,
-                          skiprows=0,
                           header=None,
                           dtype=empresa_dtypes,
                           encoding='latin-1',
+                          chunksize=CHUNKSIZE,
     )
 
-    # Tratamento do arquivo antes de inserir na base:
-    empresa = empresa.reset_index()
-    del empresa['index']
+    for i, chunk in enumerate(reader):
+        chunk.columns = empresa_cols
+        # Replace "," por "."
+        chunk['capital_social'] = chunk['capital_social'].apply(lambda x: str(x).replace(',','.'))
+        chunk['capital_social'] = chunk['capital_social'].astype(float)
 
-    # Renomear colunas
-    empresa.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
+        # Gravar dados no banco:
+        copy_from_stringio(cur, chunk, 'empresa')
+        print(f'\rChunk {i} do arquivo {arquivos_empresa[e]} inserido com sucesso no banco de dados!', end='')
 
-    # Replace "," por "."
-    empresa['capital_social'] = empresa['capital_social'].apply(lambda x: x.replace(',','.'))
-    empresa['capital_social'] = empresa['capital_social'].astype(float)
+    print(f'\nArquivo {arquivos_empresa[e]} finalizado.')
 
-    # Gravar dados no banco:
-    # Empresa
-    to_sql(empresa, name='empresa', con=engine, if_exists='append', index=False)
-    print('Arquivo ' + arquivos_empresa[e] + ' inserido com sucesso no banco de dados!')
+    gc.collect()
 
-try:
-    del empresa
-except:
-    pass
 print('Arquivos de empresa finalizados!')
 empresa_insert_end = time.time()
 empresa_Tempo_insert = round((empresa_insert_end - empresa_insert_start))
@@ -380,8 +376,8 @@ for e in range(0, len(arquivos_estabelecimento)):
 
         # Gravar dados no banco:
         # estabelecimento
-        to_sql(estabelecimento, name='estabelecimento', con=engine, if_exists='append', index=False)
-        print('Arquivo ' + arquivos_estabelecimento[e] + ' / ' + str(part) + ' inserido com sucesso no banco de dados!')
+        copy_from_stringio(cur, estabelecimento, 'estabelecimento')
+        print(f'\rArquivo {arquivos_estabelecimento[e]} / parte {part} inserido com sucesso!', end='')
         if len(estabelecimento) == NROWS:
             part += 1
         else:
@@ -409,51 +405,31 @@ print("""
 cur.execute('DROP TABLE IF EXISTS "socios";')
 conn.commit()
 
+socios_dtypes = {0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32', 5: 'Int32', 6: 'Int32',
+                 7: object, 8: object, 9: 'Int32', 10: 'Int32'}
+socios_cols = ['cnpj_basico', 'identificador_socio', 'nome_socio_razao_social', 'cpf_cnpj_socio', 'qualificacao_socio', 'data_entrada_sociedade', 'pais', 'representante_legal', 'nome_do_representante', 'qualificacao_representante_legal', 'faixa_etaria']
+
 for e in range(0, len(arquivos_socios)):
     print('Trabalhando no arquivo: '+arquivos_socios[e]+' [...]')
-    try:
-        del socios
-    except:
-        pass
-
-    socios_dtypes = {0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32', 5: 'Int32', 6: 'Int32',
-                     7: object, 8: object, 9: 'Int32', 10: 'Int32'}
     extracted_file_path = os.path.join(extracted_files, arquivos_socios[e])
-    socios = pd.read_csv(filepath_or_buffer=extracted_file_path,
+
+    reader = pd.read_csv(filepath_or_buffer=extracted_file_path,
                           sep=';',
-                          #nrows=100,
-                          skiprows=0,
                           header=None,
                           dtype=socios_dtypes,
                           encoding='latin-1',
+                          chunksize=CHUNKSIZE,
     )
 
-    # Tratamento do arquivo antes de inserir na base:
-    socios = socios.reset_index()
-    del socios['index']
+    for i, chunk in enumerate(reader):
+        chunk.columns = socios_cols
+        copy_from_stringio(cur, chunk, 'socios')
+        print(f'\rChunk {i} do arquivo {arquivos_socios[e]} inserido com sucesso no banco de dados!', end='')
 
-    # Renomear colunas
-    socios.columns = ['cnpj_basico',
-                      'identificador_socio',
-                      'nome_socio_razao_social',
-                      'cpf_cnpj_socio',
-                      'qualificacao_socio',
-                      'data_entrada_sociedade',
-                      'pais',
-                      'representante_legal',
-                      'nome_do_representante',
-                      'qualificacao_representante_legal',
-                      'faixa_etaria']
+    print(f'\nArquivo {arquivos_socios[e]} finalizado.')
 
-    # Gravar dados no banco:
-    # socios
-    to_sql(socios, name='socios', con=engine, if_exists='append', index=False)
-    print('Arquivo ' + arquivos_socios[e] + ' inserido com sucesso no banco de dados!')
+    gc.collect()
 
-try:
-    del socios
-except:
-    pass
 print('Arquivos de socios finalizados!')
 socios_insert_end = time.time()
 socios_Tempo_insert = round((socios_insert_end - socios_insert_start))
@@ -524,8 +500,8 @@ for e in range(0, len(arquivos_simples)):
 
         # Gravar dados no banco:
         # simples
-        to_sql(simples, name='simples', con=engine, if_exists='append', index=False)
-        print('Arquivo ' + arquivos_simples[e] + ' inserido com sucesso no banco de dados! - Parte '+ str(i+1))
+        copy_from_stringio(cur, simples, 'simples')
+        print(f'\rArquivo {arquivos_simples[e]} / parte {i+1} de {partes} inserido com sucesso!', end='')
 
         try:
             del simples
@@ -575,7 +551,7 @@ for e in range(0, len(arquivos_cnae)):
 
     # Gravar dados no banco:
     # cnae
-    to_sql(cnae, name='cnae', con=engine, if_exists='append', index=False)
+    copy_from_stringio(cur, cnae, 'cnae')
     print('Arquivo ' + arquivos_cnae[e] + ' inserido com sucesso no banco de dados!')
 
 try:
@@ -620,7 +596,7 @@ for e in range(0, len(arquivos_moti)):
 
     # Gravar dados no banco:
     # moti
-    to_sql(moti, name='moti', con=engine, if_exists='append', index=False)
+    copy_from_stringio(cur, moti, 'moti')
     print('Arquivo ' + arquivos_moti[e] + ' inserido com sucesso no banco de dados!')
 
 try:
@@ -665,7 +641,7 @@ for e in range(0, len(arquivos_munic)):
 
     # Gravar dados no banco:
     # munic
-    to_sql(munic, name='munic', con=engine, if_exists='append', index=False)
+    copy_from_stringio(cur, munic, 'munic')
     print('Arquivo ' + arquivos_munic[e] + ' inserido com sucesso no banco de dados!')
 
 try:
@@ -710,7 +686,7 @@ for e in range(0, len(arquivos_natju)):
 
     # Gravar dados no banco:
     # natju
-    to_sql(natju, name='natju', con=engine, if_exists='append', index=False)
+    copy_from_stringio(cur, natju, 'natju')
     print('Arquivo ' + arquivos_natju[e] + ' inserido com sucesso no banco de dados!')
 
 try:
@@ -755,7 +731,7 @@ for e in range(0, len(arquivos_pais)):
 
     # Gravar dados no banco:
     # pais
-    to_sql(pais, name='pais', con=engine, if_exists='append', index=False)
+    copy_from_stringio(cur, pais, 'pais')
     print('Arquivo ' + arquivos_pais[e] + ' inserido com sucesso no banco de dados!')
 
 try:
@@ -800,7 +776,7 @@ for e in range(0, len(arquivos_quals)):
 
     # Gravar dados no banco:
     # quals
-    to_sql(quals, name='quals', con=engine, if_exists='append', index=False)
+    copy_from_stringio(cur, quals, 'quals')
     print('Arquivo ' + arquivos_quals[e] + ' inserido com sucesso no banco de dados!')
 
 try:
