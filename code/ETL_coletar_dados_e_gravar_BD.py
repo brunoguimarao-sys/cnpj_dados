@@ -14,9 +14,28 @@ import sys
 import time
 import requests
 import urllib.request
+import urllib.parse
 import wget
 import zipfile
 
+
+def urlopen_with_retry(url):
+    """
+    Tenta abrir uma URL com um número máximo de retentativas em caso de falha.
+    """
+    MAX_RETRIES = 3
+    RETRY_DELAY_SECONDS = 10
+    for attempt in range(MAX_RETRIES):
+        try:
+            return urllib.request.urlopen(url, timeout=60)
+        except urllib.error.URLError as e:
+            print(f"AVISO: Falha ao acessar {url}. Erro: {e}")
+            if attempt < MAX_RETRIES - 1:
+                print(f"Aguardando {RETRY_DELAY_SECONDS} segundos antes de tentar novamente...")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                print(f"ERRO: Todas as tentativas de conexão com {url} falharam. Abortando.")
+                raise  # Relança a exceção para ser tratada pelo chamador
 
 def check_diff(url, file_name):
     '''
@@ -110,35 +129,56 @@ except Exception as e:
     print(f'Erro na definição das variáveis de ambiente: {e}, verifique o arquivo ".env" ou o local informado do seu arquivo de configuração.')
     sys.exit(1)
 
+def get_latest_data_url(base_url):
+    """
+    Acessa a URL base e encontra o link para o diretório de dados mais recente.
+    """
+    print(f"Buscando diretórios de dados em: {base_url}")
+    response = urlopen_with_retry(base_url)
+    raw_html = response.read()
+    page = bs.BeautifulSoup(raw_html, 'lxml')
+
+    # Encontra todos os links que parecem ser diretórios (terminam com /)
+    dir_links = [a['href'] for a in page.find_all('a') if a['href'].endswith('/') and a['href'] != '../']
+
+    if not dir_links:
+        print("ERRO: Nenhum diretório de dados encontrado na URL base.")
+        sys.exit(1)
+
+    # Assume que o último link é o mais recente (geralmente ordenado)
+    latest_dir = sorted(dir_links)[-1]
+    latest_data_url = urllib.parse.urljoin(base_url, latest_dir)
+    print(f"Diretório de dados mais recente encontrado: {latest_data_url}")
+    return latest_data_url
+
+def get_zip_files_from_url(data_url):
+    """
+    Acessa a URL do diretório de dados e extrai a lista de todos os arquivos .zip.
+    """
+    print(f"Buscando arquivos .zip em: {data_url}")
+    response = urlopen_with_retry(data_url)
+    raw_html = response.read()
+    page = bs.BeautifulSoup(raw_html, 'lxml')
+
+    zip_files = [a['href'] for a in page.find_all('a') if a['href'].endswith('.zip')]
+
+    if not zip_files:
+        print("ERRO: Nenhum arquivo .zip encontrado no diretório de dados.")
+        sys.exit(1)
+
+    return zip_files
+
 #%%
-raw_html = urllib.request.urlopen(dados_rf)
-raw_html = raw_html.read()
-
-# Formatar página e converter em string
-page_items = bs.BeautifulSoup(raw_html, 'lxml')
-html_str = str(page_items)
-
-# Obter arquivos
-Files = []
-text = '.zip'
-for m in re.finditer(text, html_str):
-    i_start = m.start()-40
-    i_end = m.end()
-    i_loc = html_str[i_start:i_end].find('href=')+6
-    Files.append(html_str[i_start+i_loc:i_end])
-
-# Correcao do nome dos arquivos devido a mudanca na estrutura do HTML da pagina - 31/07/22 - Aphonso Rafael
-Files_clean = []
-for i in range(len(Files)):
-    if not Files[i].find('.zip">') > -1:
-        Files_clean.append(Files[i])
-
+# --- Lógica de Descoberta de Arquivos ---
 try:
-    del Files
-except:
-    pass
-
-Files = Files_clean
+    latest_data_url = get_latest_data_url(dados_rf)
+    Files = get_zip_files_from_url(latest_data_url)
+    # A URL base para download passa a ser a do diretório de dados mais recente
+    dados_rf = latest_data_url
+except urllib.error.URLError:
+    # A função urlopen_with_retry já imprimiu o erro detalhado.
+    # Apenas encerramos o script.
+    sys.exit(1)
 
 print('Arquivos que serão baixados:')
 i_f = 0
@@ -214,29 +254,30 @@ arquivos_munic = []
 arquivos_natju = []
 arquivos_pais = []
 arquivos_quals = []
-for i in range(len(Items)):
-    if Items[i].find('EMPRE') > -1:
-        arquivos_empresa.append(Items[i])
-    elif Items[i].find('ESTABELE') > -1:
-        arquivos_estabelecimento.append(Items[i])
-    elif Items[i].find('SOCIO') > -1:
-        arquivos_socios.append(Items[i])
-    elif Items[i].find('SIMPLES') > -1:
-        arquivos_simples.append(Items[i])
-    elif Items[i].find('CNAE') > -1:
-        arquivos_cnae.append(Items[i])
-    elif Items[i].find('MOTI') > -1:
-        arquivos_moti.append(Items[i])
-    elif Items[i].find('MUNIC') > -1:
-        arquivos_munic.append(Items[i])
-    elif Items[i].find('NATJU') > -1:
-        arquivos_natju.append(Items[i])
-    elif Items[i].find('PAIS') > -1:
-        arquivos_pais.append(Items[i])
-    elif Items[i].find('QUALS') > -1:
-        arquivos_quals.append(Items[i])
+for item in Items:
+    item_upper = item.upper()
+    if 'EMPRESAS' in item_upper:
+        arquivos_empresa.append(item)
+    elif 'ESTABELECIMENTOS' in item_upper:
+        arquivos_estabelecimento.append(item)
+    elif 'SOCIOS' in item_upper:
+        arquivos_socios.append(item)
+    elif 'SIMPLES' in item_upper:
+        arquivos_simples.append(item)
+    elif 'CNAES' in item_upper:
+        arquivos_cnae.append(item)
+    elif 'MOTIVOS' in item_upper:
+        arquivos_moti.append(item)
+    elif 'MUNICIPIOS' in item_upper:
+        arquivos_munic.append(item)
+    elif 'NATUREZAS' in item_upper:
+        arquivos_natju.append(item)
+    elif 'PAISES' in item_upper:
+        arquivos_pais.append(item)
+    elif 'QUALIFICACOES' in item_upper:
+        arquivos_quals.append(item)
     else:
-        pass
+        print(f"AVISO: Arquivo '{item}' não classificado e será ignorado.")
 
 #%%
 # Conectar no banco de dados:
