@@ -331,7 +331,7 @@ def process_table_files(engine, table_name, files, schema, extracted_path):
             for i, chunk in enumerate(reader):
                 bulk_insert_to_sql(engine, chunk, table_name)
                 total_rows_inserted += len(chunk)
-                logging.info(f'\r    Chunk {i+1} do arquivo {file_name} inserido com sucesso!', end='')
+                logging.info(f'    Chunk {i+1} do arquivo {file_name} inserido com sucesso.')
 
             logging.info(f'\n  Arquivo {file_name} finalizado.')
             gc.collect()
@@ -347,7 +347,8 @@ def process_table_files(engine, table_name, files, schema, extracted_path):
 def bulk_insert_to_sql(engine, df, table_name):
     """Insere um DataFrame em uma tabela do SQL Server usando to_sql e um engine SQLAlchemy."""
     try:
-        df.to_sql(table_name, con=engine, if_exists='append', index=False, chunksize=10000, method='multi')
+        # Usar method=None é mais lento mas compatível com todos os cenários de fast_executemany
+        df.to_sql(table_name, con=engine, if_exists='append', index=False, chunksize=10000, method=None)
     except Exception as error:
         logging.error(f"Erro ao inserir dados na tabela {table_name}: {error}")
 
