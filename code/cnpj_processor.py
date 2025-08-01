@@ -250,10 +250,10 @@ def create_database_indexes(engine):
     logging.info("--- CRIANDO ÍNDICES NO BANCO DE DADOS ---")
     with engine.connect() as connection:
         try:
-            connection.execute("CREATE INDEX idx_empresa_cnpj ON empresa(cnpj_basico);")
-            connection.execute("CREATE INDEX idx_estabelecimento_cnpj ON estabelecimento(cnpj_basico);")
-            connection.execute("CREATE INDEX idx_socios_cnpj ON socios(cnpj_basico);")
-            connection.execute("CREATE INDEX idx_simples_cnpj ON simples(cnpj_basico);")
+            connection.execute(text("CREATE INDEX idx_empresa_cnpj ON empresa(cnpj_basico);"))
+            connection.execute(text("CREATE INDEX idx_estabelecimento_cnpj ON estabelecimento(cnpj_basico);"))
+            connection.execute(text("CREATE INDEX idx_socios_cnpj ON socios(cnpj_basico);"))
+            connection.execute(text("CREATE INDEX idx_simples_cnpj ON simples(cnpj_basico);"))
             connection.commit()
             logging.info("Índices criados com sucesso para a coluna `cnpj_basico`.")
         except Exception as e:
