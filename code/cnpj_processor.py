@@ -297,7 +297,7 @@ def process_table_files(engine, table_name, files, schema, extracted_path):
                 quotechar='"',
                 escapechar='\\',
                 chunksize=100_000,
-                on_bad_lines='raise' # Use 'raise' to catch and log errors
+                on_bad_lines='skip' # Use 'skip' for compatibility with older pandas versions
             )
 
             for i, chunk in enumerate(reader):
