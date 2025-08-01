@@ -62,10 +62,10 @@ def load_environment_variables():
         "extracted_path": os.getenv('EXTRACTED_FILES_PATH'),
         "db_driver": os.getenv('DB_DRIVER'),
         "db_server": os.getenv('DB_SERVER'),
-        "db_name": os.getenv('DB_NAME'),
         "db_user": os.getenv('DB_USER'),
         "db_password": os.getenv('DB_PASSWORD')
     }
+    db_name = os.getenv('DB_NAME')
 
     if not all(config.values()):
         logging.error("Uma ou mais variáveis de ambiente não foram definidas no arquivo .env.")
@@ -79,7 +79,7 @@ def load_environment_variables():
     logging.info(f'  - Extração de arquivos CSV: {config["extracted_path"]}')
     logging.info(f'URL dos dados: {config["data_url"]}')
 
-    return config
+    return config, db_name
 
 def makedirs(path):
     """Cria um diretório se ele não existir."""
@@ -192,16 +192,19 @@ def bar_progress(current, total, width=80):
 # FUNÇÕES DE BANCO DE DADOS
 # =============================================================================
 
-def get_db_engine(config):
+def get_db_engine(config, db_name=None):
     """
     Cria e retorna um engine do SQLAlchemy para o SQL Server.
+    Se db_name for None, conecta-se ao banco de dados padrão do servidor.
     """
+    db_to_connect = db_name if db_name else config["db_name"]
+
     connection_url = URL.create(
         "mssql+pyodbc",
         username=config["db_user"],
         password=config["db_password"],
         host=config["db_server"],
-        database=config["db_name"],
+        database=db_to_connect,
         query={"driver": config["db_driver"]},
     )
 
@@ -209,11 +212,36 @@ def get_db_engine(config):
         engine = create_engine(connection_url)
         # Testa a conexão
         with engine.connect() as connection:
-            logging.info("Conexão com o SQL Server (via SQLAlchemy) bem-sucedida!")
+            logging.info(f"Conexão com o SQL Server (banco: '{db_to_connect}') bem-sucedida!")
         return engine
     except Exception as e:
+        # Adiciona um aviso sobre a senha se a autenticação falhar
+        if 'Login failed' in str(e):
+            logging.error("Falha de logon. Verifique se o usuário e a senha no seu arquivo .env estão corretos.")
         logging.error(f"Falha ao criar engine de conexão com o SQL Server. Erro: {e}")
         sys.exit(1)
+
+def prepare_database(engine, db_name):
+    """Garante que o banco de dados de destino exista e esteja limpo."""
+    logging.info(f"Preparando o banco de dados '{db_name}'...")
+    with engine.connect() as connection:
+        connection = connection.execution_options(isolation_level="AUTOCOMMIT")
+        try:
+            logging.info(f"Tentando remover o banco de dados '{db_name}' se ele já existir...")
+            connection.execute(text(f"DROP DATABASE IF EXISTS [{db_name}]"))
+            logging.info("Banco de dados removido com sucesso (ou não existia).")
+        except Exception as e:
+            logging.error(f"Não foi possível remover o banco de dados '{db_name}'. Erro: {e}")
+            logging.error("Verifique as permissões do usuário e se não há conexões ativas no banco de dados.")
+            sys.exit(1)
+
+        try:
+            logging.info(f"Criando o banco de dados '{db_name}'...")
+            connection.execute(text(f"CREATE DATABASE [{db_name}]"))
+            logging.info(f"Banco de dados '{db_name}' criado com sucesso.")
+        except Exception as e:
+            logging.error(f"Não foi possível criar o banco de dados '{db_name}'. Erro: {e}")
+            sys.exit(1)
 
 def setup_database_tables(engine):
     """
@@ -388,24 +416,31 @@ def main():
     logging.info(">>> INICIANDO PROCESSO DE ETL DE DADOS DA RECEITA FEDERAL <<<")
 
     # 1. Carregar Configurações
-    config = load_environment_variables()
+    config, db_name = load_environment_variables()
 
     # 2. Download e Extração
     download_data_files(config['data_url'], config['output_path'])
     extract_zip_files(config['output_path'], config['extracted_path'])
 
     # 3. Conexão e Configuração do Banco de Dados
-    engine = get_db_engine(config)
-    setup_database_tables(engine)
+    logging.info("Conectando ao servidor SQL para preparar o banco de dados...")
+    master_engine = get_db_engine(config, db_name='master')
+    prepare_database(master_engine, db_name)
+    master_engine.dispose()
+
+    logging.info(f"Conectando ao banco de dados '{db_name}' recém-criado...")
+    target_engine = get_db_engine(config, db_name=db_name)
+
+    setup_database_tables(target_engine)
 
     # 4. Processamento e Carga dos Dados
-    process_and_load_data(engine, config['extracted_path'])
+    process_and_load_data(target_engine, config['extracted_path'])
 
     # 5. Otimização do Banco (Índices)
-    create_database_indexes(engine)
+    create_database_indexes(target_engine)
 
     # Fechar a conexão
-    engine.dispose()
+    target_engine.dispose()
 
     total_time = round(time.time() - start_time)
     logging.info(f"--- PROCESSO 100% FINALIZADO EM {total_time} SEGUNDOS! ---")
