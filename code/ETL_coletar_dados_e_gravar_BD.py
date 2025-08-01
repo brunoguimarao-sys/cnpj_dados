@@ -65,12 +65,12 @@ def makedirs(path):
 
 def create_tables(cursor):
     """
-    Cria todas as tabelas no banco de dados, dropando as existentes antes.
-    Isso garante que cada execução comece com um ambiente limpo.
+    Cria todas as tabelas no banco de dados com base no layout oficial,
+    dropando as existentes antes para garantir um ambiente limpo.
     """
-    print("Criando/recriando tabelas no banco de dados...")
+    print("Criando/recriando tabelas no banco de dados conforme layout oficial...")
 
-    # DDL para cada tabela
+    # DDLs baseados no documento "NOVOLAYOUTDOSDADOSABERTOSDOCNPJ.pdf"
     ddl_commands = {
         "empresa": """CREATE TABLE empresa (
             cnpj_basico VARCHAR(8),
@@ -91,7 +91,7 @@ def create_tables(cursor):
             data_situacao_cadastral VARCHAR(8),
             motivo_situacao_cadastral INTEGER,
             nome_cidade_exterior VARCHAR,
-            pais VARCHAR(3),
+            pais VARCHAR,
             data_inicio_atividade VARCHAR(8),
             cnae_fiscal_principal INTEGER,
             cnae_fiscal_secundaria VARCHAR,
@@ -120,7 +120,7 @@ def create_tables(cursor):
             cpf_cnpj_socio VARCHAR(14),
             qualificacao_socio INTEGER,
             data_entrada_sociedade VARCHAR(8),
-            pais VARCHAR(3),
+            pais INTEGER,
             representante_legal VARCHAR(14),
             nome_do_representante VARCHAR,
             qualificacao_representante_legal INTEGER,
@@ -402,8 +402,17 @@ print("""
 """)
 
 CHUNKSIZE = 1_000_000
-empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
+# Schema para EMPRESAS
 empresa_cols = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
+empresa_dtypes = {
+    'cnpj_basico': str,
+    'razao_social': str,
+    'natureza_juridica': 'Int32',
+    'qualificacao_responsavel': 'Int32',
+    'capital_social': str, # Lemos como string para tratar a vírgula
+    'porte_empresa': 'Int32',
+    'ente_federativo_responsavel': str
+}
 
 for e in range(0, len(arquivos_empresa)):
     print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
@@ -412,16 +421,18 @@ for e in range(0, len(arquivos_empresa)):
     reader = pd.read_csv(filepath_or_buffer=extracted_file_path,
                           sep=';',
                           header=None,
+                          names=empresa_cols,
                           dtype=empresa_dtypes,
                           encoding='latin-1',
                           chunksize=CHUNKSIZE,
+                          quotechar='"',
+                          engine='python'
     )
 
     for i, chunk in enumerate(reader):
-        chunk.columns = empresa_cols
-        # Replace "," por "."
-        chunk['capital_social'] = chunk['capital_social'].apply(lambda x: str(x).replace(',','.'))
-        chunk['capital_social'] = chunk['capital_social'].astype(float)
+        # A linha de cabeçalho é atribuída novamente dentro do loop, o que é redundante, mas inofensivo.
+        # O importante é o tratamento de capital_social e a inserção.
+        chunk['capital_social'] = chunk['capital_social'].str.replace(',', '.').astype(float)
 
         # Gravar dados no banco:
         copy_from_stringio(cur, chunk, 'empresa')
@@ -455,76 +466,39 @@ for e in range(0, len(arquivos_estabelecimento)):
     except:
         pass
 
-    # estabelecimento = pd.DataFrame(columns=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28])
-    estabelecimento_dtypes = {0: object, 1: object, 2: object, 3: 'Int32', 4: object, 5: 'Int32', 6: 'Int32',
-                              7: 'Int32', 8: object, 9: object, 10: 'Int32', 11: 'Int32', 12: object, 13: object,
-                              14: object, 15: object, 16: object, 17: object, 18: object, 19: object,
-                              20: 'Int32', 21: object, 22: object, 23: object, 24: object, 25: object,
-                              26: object, 27: object, 28: object, 29: 'Int32'}
+    # Schema para ESTABELECIMENTOS
+    est_cols = [
+        'cnpj_basico', 'cnpj_ordem', 'cnpj_dv', 'identificador_matriz_filial', 'nome_fantasia',
+        'situacao_cadastral', 'data_situacao_cadastral', 'motivo_situacao_cadastral', 'nome_cidade_exterior', 'pais',
+        'data_inicio_atividade', 'cnae_fiscal_principal', 'cnae_fiscal_secundaria', 'tipo_logradouro', 'logradouro',
+        'numero', 'complemento', 'bairro', 'cep', 'uf', 'municipio',
+        'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2', 'ddd_fax', 'fax',
+        'correio_eletronico', 'situacao_especial', 'data_situacao_especial'
+    ]
+    est_dtypes = {col: str for col in est_cols} # Ler tudo como string para evitar erros de tipo
+
     extracted_file_path = os.path.join(extracted_files, arquivos_estabelecimento[e])
 
-    NROWS = 2000000
-    part = 0
-    while True:
-        estabelecimento = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                              sep=';',
-                              nrows=NROWS,
-                              skiprows=NROWS * part,
-                              header=None,
-                              dtype=estabelecimento_dtypes,
-                              encoding='latin-1',
-        )
+    reader = pd.read_csv(
+        filepath_or_buffer=extracted_file_path,
+        sep=';',
+        header=None,
+        names=est_cols,
+        dtype=est_dtypes,
+        encoding='latin-1',
+        chunksize=CHUNKSIZE,
+        quotechar='"',
+        engine='python'
+    )
 
-        # Tratamento do arquivo antes de inserir na base:
-        estabelecimento = estabelecimento.reset_index()
-        del estabelecimento['index']
-        gc.collect()
+    for i, chunk in enumerate(reader):
+        # Nenhum tratamento extra necessário por enquanto
+        copy_from_stringio(cur, chunk, 'estabelecimento')
+        print(f'\rChunk {i} do arquivo {arquivos_estabelecimento[e]} inserido com sucesso!', end='')
 
-        # Renomear colunas
-        estabelecimento.columns = ['cnpj_basico',
-                                   'cnpj_ordem',
-                                   'cnpj_dv',
-                                   'identificador_matriz_filial',
-                                   'nome_fantasia',
-                                   'situacao_cadastral',
-                                   'data_situacao_cadastral',
-                                   'motivo_situacao_cadastral',
-                                   'nome_cidade_exterior',
-                                   'pais',
-                                   'data_inicio_atividade',
-                                   'cnae_fiscal_principal',
-                                   'cnae_fiscal_secundaria',
-                                   'tipo_logradouro',
-                                   'logradouro',
-                                   'numero',
-                                   'complemento',
-                                   'bairro',
-                                   'cep',
-                                   'uf',
-                                   'municipio',
-                                   'ddd_1',
-                                   'telefone_1',
-                                   'ddd_2',
-                                   'telefone_2',
-                                   'ddd_fax',
-                                   'fax',
-                                   'correio_eletronico',
-                                   'situacao_especial',
-                                   'data_situacao_especial']
+    print(f'\nArquivo {arquivos_estabelecimento[e]} finalizado.')
+    gc.collect()
 
-        # Gravar dados no banco:
-        # estabelecimento
-        copy_from_stringio(cur, estabelecimento, 'estabelecimento')
-        print(f'\rArquivo {arquivos_estabelecimento[e]} / parte {part} inserido com sucesso!', end='')
-        if len(estabelecimento) == NROWS:
-            part += 1
-        else:
-            break
-
-try:
-    del estabelecimento
-except:
-    pass
 print('Arquivos de estabelecimento finalizados!')
 estabelecimento_insert_end = time.time()
 estabelecimento_Tempo_insert = round((estabelecimento_insert_end - estabelecimento_insert_start))
@@ -540,9 +514,13 @@ print("""
 """)
 
 
-socios_dtypes = {0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32', 5: 'Int32', 6: 'Int32',
-                 7: object, 8: object, 9: 'Int32', 10: 'Int32'}
-socios_cols = ['cnpj_basico', 'identificador_socio', 'nome_socio_razao_social', 'cpf_cnpj_socio', 'qualificacao_socio', 'data_entrada_sociedade', 'pais', 'representante_legal', 'nome_do_representante', 'qualificacao_representante_legal', 'faixa_etaria']
+# Schema para SOCIOS
+socios_cols = [
+    'cnpj_basico', 'identificador_socio', 'nome_socio_razao_social', 'cpf_cnpj_socio', 'qualificacao_socio',
+    'data_entrada_sociedade', 'pais', 'representante_legal', 'nome_do_representante',
+    'qualificacao_representante_legal', 'faixa_etaria'
+]
+socios_dtypes = {col: str for col in socios_cols} # Ler tudo como string
 
 for e in range(0, len(arquivos_socios)):
     print('Trabalhando no arquivo: '+arquivos_socios[e]+' [...]')
@@ -551,13 +529,15 @@ for e in range(0, len(arquivos_socios)):
     reader = pd.read_csv(filepath_or_buffer=extracted_file_path,
                           sep=';',
                           header=None,
+                          names=socios_cols,
                           dtype=socios_dtypes,
                           encoding='latin-1',
                           chunksize=CHUNKSIZE,
+                          quotechar='"',
+                          engine='python'
     )
 
     for i, chunk in enumerate(reader):
-        chunk.columns = socios_cols
         copy_from_stringio(cur, chunk, 'socios')
         print(f'\rChunk {i} do arquivo {arquivos_socios[e]} inserido com sucesso no banco de dados!', end='')
 
@@ -587,12 +567,18 @@ for e in range(0, len(arquivos_simples)):
     except:
         pass
 
+    # Schema para SIMPLES
+    simples_cols = [
+        'cnpj_basico', 'opcao_pelo_simples', 'data_opcao_simples', 'data_exclusao_simples',
+        'opcao_mei', 'data_opcao_mei', 'data_exclusao_mei'
+    ]
+    simples_dtypes = {col: str for col in simples_cols}
+
     # Verificar tamanho do arquivo:
     print('Lendo o arquivo ' + arquivos_simples[e]+' [...]')
-    simples_dtypes = ({0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: 'Int32'})
     extracted_file_path = os.path.join(extracted_files, arquivos_simples[e])
 
-    simples_lenght = sum(1 for line in open(extracted_file_path, "r"))
+    simples_lenght = sum(1 for line in open(extracted_file_path, "r", encoding='latin-1'))
     print('Linhas no arquivo do Simples '+ arquivos_simples[e] +': '+str(simples_lenght))
 
     tamanho_das_partes = 1000000 # Registros por carga
@@ -604,29 +590,17 @@ for e in range(0, len(arquivos_simples)):
 
     for i in range(0, partes):
         print('Iniciando a parte ' + str(i+1) + ' [...]')
-        simples = pd.DataFrame(columns=[1,2,3,4,5,6])
-
         simples = pd.read_csv(filepath_or_buffer=extracted_file_path,
                               sep=';',
                               nrows=nrows,
                               skiprows=skiprows,
                               header=None,
+                              names=simples_cols,
                               dtype=simples_dtypes,
                               encoding='latin-1',
+                              quotechar='"',
+                              engine='python'
         )
-
-        # Tratamento do arquivo antes de inserir na base:
-        simples = simples.reset_index()
-        del simples['index']
-
-        # Renomear colunas
-        simples.columns = ['cnpj_basico',
-                           'opcao_pelo_simples',
-                           'data_opcao_simples',
-                           'data_exclusao_simples',
-                           'opcao_mei',
-                           'data_opcao_mei',
-                           'data_exclusao_mei']
 
         skiprows = skiprows+nrows
 
@@ -651,256 +625,45 @@ simples_Tempo_insert = round((simples_insert_end - simples_insert_start))
 print('Tempo de execução do processo do Simples Nacional (em segundos): ' + str(simples_Tempo_insert))
 
 #%%
-# Arquivos de cnae:
-cnae_insert_start = time.time()
-print("""
-######################
-## Arquivos de cnae:
-######################
-""")
+def process_lookup_table(files, table_name, file_pattern, columns, dtypes):
+    """
+    Função genérica para processar tabelas de lookup (domínio).
+    """
+    insert_start = time.time()
+    print(f"\n######################\n## Arquivos de {table_name.upper()}:\n######################")
 
+    for e in range(0, len(files)):
+        print(f'Trabalhando no arquivo: {files[e]} [...]')
+        extracted_file_path = os.path.join(extracted_files, files[e])
 
-for e in range(0, len(arquivos_cnae)):
-    print('Trabalhando no arquivo: '+arquivos_cnae[e]+' [...]')
-    try:
-        del cnae
-    except:
-        pass
+        df = pd.read_csv(
+            filepath_or_buffer=extracted_file_path,
+            sep=';',
+            header=None,
+            names=columns,
+            dtype=dtypes,
+            encoding='latin-1',
+            quotechar='"',
+            engine='python'
+        )
 
-    extracted_file_path = os.path.join(extracted_files, arquivos_cnae[e])
-    cnae = pd.DataFrame(columns=[1,2])
-    cnae = pd.read_csv(filepath_or_buffer=extracted_file_path, sep=';', skiprows=0, header=None, dtype='object', encoding='latin-1')
+        copy_from_stringio(cur, df, table_name)
+        print(f'Arquivo {files[e]} inserido com sucesso na tabela {table_name}!')
 
-    # Tratamento do arquivo antes de inserir na base:
-    cnae = cnae.reset_index()
-    del cnae['index']
+    insert_end = time.time()
+    tempo_insert = round(insert_end - insert_start)
+    print(f'Arquivos de {table_name} finalizados! Tempo de execução (em segundos): {tempo_insert}')
 
-    # Renomear colunas
-    cnae.columns = ['codigo', 'descricao']
+# Processar todas as tabelas de lookup
+lookup_columns = ['codigo', 'descricao']
+lookup_dtypes = {'codigo': 'Int32', 'descricao': str}
 
-    # Gravar dados no banco:
-    # cnae
-    copy_from_stringio(cur, cnae, 'cnae')
-    print('Arquivo ' + arquivos_cnae[e] + ' inserido com sucesso no banco de dados!')
-
-try:
-    del cnae
-except:
-    pass
-print('Arquivos de cnae finalizados!')
-cnae_insert_end = time.time()
-cnae_Tempo_insert = round((cnae_insert_end - cnae_insert_start))
-print('Tempo de execução do processo de cnae (em segundos): ' + str(cnae_Tempo_insert))
-
-#%%
-# Arquivos de moti:
-moti_insert_start = time.time()
-print("""
-#########################################
-## Arquivos de motivos da situação atual:
-#########################################
-""")
-
-
-for e in range(0, len(arquivos_moti)):
-    print('Trabalhando no arquivo: '+arquivos_moti[e]+' [...]')
-    try:
-        del moti
-    except:
-        pass
-
-    moti_dtypes = ({0: 'Int32', 1: object})
-    extracted_file_path = os.path.join(extracted_files, arquivos_moti[e])
-    moti = pd.read_csv(filepath_or_buffer=extracted_file_path, sep=';', skiprows=0, header=None, dtype=moti_dtypes, encoding='latin-1')
-
-    # Tratamento do arquivo antes de inserir na base:
-    moti = moti.reset_index()
-    del moti['index']
-
-    # Renomear colunas
-    moti.columns = ['codigo', 'descricao']
-
-    # Gravar dados no banco:
-    # moti
-    copy_from_stringio(cur, moti, 'moti')
-    print('Arquivo ' + arquivos_moti[e] + ' inserido com sucesso no banco de dados!')
-
-try:
-    del moti
-except:
-    pass
-print('Arquivos de moti finalizados!')
-moti_insert_end = time.time()
-moti_Tempo_insert = round((moti_insert_end - moti_insert_start))
-print('Tempo de execução do processo de motivos da situação atual (em segundos): ' + str(moti_Tempo_insert))
-
-#%%
-# Arquivos de munic:
-munic_insert_start = time.time()
-print("""
-##########################
-## Arquivos de municípios:
-##########################
-""")
-
-
-for e in range(0, len(arquivos_munic)):
-    print('Trabalhando no arquivo: '+arquivos_munic[e]+' [...]')
-    try:
-        del munic
-    except:
-        pass
-
-    munic_dtypes = ({0: 'Int32', 1: object})
-    extracted_file_path = os.path.join(extracted_files, arquivos_munic[e])
-    munic = pd.read_csv(filepath_or_buffer=extracted_file_path, sep=';', skiprows=0, header=None, dtype=munic_dtypes, encoding='latin-1')
-
-    # Tratamento do arquivo antes de inserir na base:
-    munic = munic.reset_index()
-    del munic['index']
-
-    # Renomear colunas
-    munic.columns = ['codigo', 'descricao']
-
-    # Gravar dados no banco:
-    # munic
-    copy_from_stringio(cur, munic, 'munic')
-    print('Arquivo ' + arquivos_munic[e] + ' inserido com sucesso no banco de dados!')
-
-try:
-    del munic
-except:
-    pass
-print('Arquivos de munic finalizados!')
-munic_insert_end = time.time()
-munic_Tempo_insert = round((munic_insert_end - munic_insert_start))
-print('Tempo de execução do processo de municípios (em segundos): ' + str(munic_Tempo_insert))
-
-#%%
-# Arquivos de natju:
-natju_insert_start = time.time()
-print("""
-#################################
-## Arquivos de natureza jurídica:
-#################################
-""")
-
-
-for e in range(0, len(arquivos_natju)):
-    print('Trabalhando no arquivo: '+arquivos_natju[e]+' [...]')
-    try:
-        del natju
-    except:
-        pass
-
-    natju_dtypes = ({0: 'Int32', 1: object})
-    extracted_file_path = os.path.join(extracted_files, arquivos_natju[e])
-    natju = pd.read_csv(filepath_or_buffer=extracted_file_path, sep=';', skiprows=0, header=None, dtype=natju_dtypes, encoding='latin-1')
-
-    # Tratamento do arquivo antes de inserir na base:
-    natju = natju.reset_index()
-    del natju['index']
-
-    # Renomear colunas
-    natju.columns = ['codigo', 'descricao']
-
-    # Gravar dados no banco:
-    # natju
-    copy_from_stringio(cur, natju, 'natju')
-    print('Arquivo ' + arquivos_natju[e] + ' inserido com sucesso no banco de dados!')
-
-try:
-    del natju
-except:
-    pass
-print('Arquivos de natju finalizados!')
-natju_insert_end = time.time()
-natju_Tempo_insert = round((natju_insert_end - natju_insert_start))
-print('Tempo de execução do processo de natureza jurídica (em segundos): ' + str(natju_Tempo_insert))
-
-#%%
-# Arquivos de pais:
-pais_insert_start = time.time()
-print("""
-######################
-## Arquivos de país:
-######################
-""")
-
-
-for e in range(0, len(arquivos_pais)):
-    print('Trabalhando no arquivo: '+arquivos_pais[e]+' [...]')
-    try:
-        del pais
-    except:
-        pass
-
-    pais_dtypes = ({0: 'Int32', 1: object})
-    extracted_file_path = os.path.join(extracted_files, arquivos_pais[e])
-    pais = pd.read_csv(filepath_or_buffer=extracted_file_path, sep=';', skiprows=0, header=None, dtype=pais_dtypes, encoding='latin-1')
-
-    # Tratamento do arquivo antes de inserir na base:
-    pais = pais.reset_index()
-    del pais['index']
-
-    # Renomear colunas
-    pais.columns = ['codigo', 'descricao']
-
-    # Gravar dados no banco:
-    # pais
-    copy_from_stringio(cur, pais, 'pais')
-    print('Arquivo ' + arquivos_pais[e] + ' inserido com sucesso no banco de dados!')
-
-try:
-    del pais
-except:
-    pass
-print('Arquivos de pais finalizados!')
-pais_insert_end = time.time()
-pais_Tempo_insert = round((pais_insert_end - pais_insert_start))
-print('Tempo de execução do processo de país (em segundos): ' + str(pais_Tempo_insert))
-
-#%%
-# Arquivos de qualificação de sócios:
-quals_insert_start = time.time()
-print("""
-######################################
-## Arquivos de qualificação de sócios:
-######################################
-""")
-
-
-for e in range(0, len(arquivos_quals)):
-    print('Trabalhando no arquivo: '+arquivos_quals[e]+' [...]')
-    try:
-        del quals
-    except:
-        pass
-
-    quals_dtypes = ({0: 'Int32', 1: object})
-    extracted_file_path = os.path.join(extracted_files, arquivos_quals[e])
-    quals = pd.read_csv(filepath_or_buffer=extracted_file_path, sep=';', skiprows=0, header=None, dtype=quals_dtypes, encoding='latin-1')
-
-    # Tratamento do arquivo antes de inserir na base:
-    quals = quals.reset_index()
-    del quals['index']
-
-    # Renomear colunas
-    quals.columns = ['codigo', 'descricao']
-
-    # Gravar dados no banco:
-    # quals
-    copy_from_stringio(cur, quals, 'quals')
-    print('Arquivo ' + arquivos_quals[e] + ' inserido com sucesso no banco de dados!')
-
-try:
-    del quals
-except:
-    pass
-print('Arquivos de quals finalizados!')
-quals_insert_end = time.time()
-quals_Tempo_insert = round((quals_insert_end - quals_insert_start))
-print('Tempo de execução do processo de qualificação de sócios (em segundos): ' + str(quals_Tempo_insert))
+process_lookup_table(arquivos_cnae, 'cnae', 'CNAECSV', lookup_columns, lookup_dtypes)
+process_lookup_table(arquivos_moti, 'moti', 'MOTICSV', lookup_columns, lookup_dtypes)
+process_lookup_table(arquivos_munic, 'munic', 'MUNICCSV', lookup_columns, lookup_dtypes)
+process_lookup_table(arquivos_natju, 'natju', 'NATJUCSV', lookup_columns, lookup_dtypes)
+process_lookup_table(arquivos_pais, 'pais', 'PAISCSV', lookup_columns, lookup_dtypes)
+process_lookup_table(arquivos_quals, 'quals', 'QUALSCSV', lookup_columns, lookup_dtypes)
 
 #%%
 insert_end = time.time()
