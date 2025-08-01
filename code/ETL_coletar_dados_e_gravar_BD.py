@@ -153,6 +153,45 @@ def create_tables(cursor):
     conn.commit()
     print("Tabelas criadas com sucesso.")
 
+def sanitize_file(filepath, num_expected_columns):
+    """
+    Lê um arquivo CSV malformado, corrige erros linha por linha e retorna um buffer
+    em memória com os dados limpos.
+
+    Erros tratados:
+    - Quebras de linha e aspas dentro dos campos.
+    - Número de colunas maior que o esperado (delimitador extra em um campo).
+    - Número de colunas menor que o esperado (delimitador faltando).
+    """
+    print(f"    - Higienizando o arquivo: {os.path.basename(filepath)}")
+    clean_buffer = io.StringIO()
+    with open(filepath, 'r', encoding='latin-1') as f:
+        for line in f:
+            # 1. Remove quebras de linha e aspas problemáticas
+            cleaned_line = line.replace('\n', '').replace('\r', '').replace('"', '')
+
+            # 2. Divide a linha
+            parts = cleaned_line.split(';')
+
+            # 3. Corrige o número de colunas
+            if len(parts) > num_expected_columns:
+                # Heurística para colunas extras: assume que o problema está no segundo campo (razão social/nome)
+                # e junta o excesso nele.
+                reconstructed_field = " ".join(parts[1 : len(parts) - (num_expected_columns - 2)])
+                corrected_parts = [parts[0]] + [reconstructed_field] + parts[-(num_expected_columns - 2):]
+                final_line = ";".join(corrected_parts)
+            elif len(parts) < num_expected_columns:
+                # Preenche com campos vazios se faltarem colunas
+                corrected_parts = parts + [''] * (num_expected_columns - len(parts))
+                final_line = ";".join(corrected_parts)
+            else:
+                final_line = ";".join(parts)
+
+            clean_buffer.write(final_line + '\n')
+
+    clean_buffer.seek(0)
+    return clean_buffer
+
 def copy_from_stringio(cursor, df, table_name):
     """
     Usa o método copy_from do psycopg2 para inserir um dataframe do pandas
@@ -394,405 +433,125 @@ cur = conn.cursor()
 # Cria/recria todas as tabelas para garantir um ambiente limpo
 create_tables(cur)
 
-def clean_empresa_line(line, delimiter=';'):
-    """
-    Limpa uma linha do arquivo de empresa, lidando com delimitadores extras
-    no campo de razão social.
-    """
-    parts = line.strip().split(delimiter)
-    # A lógica assume que os 5 últimos campos estão sempre corretos.
-    # O campo problemático (razão social) está entre o primeiro e os 5 últimos.
-    if len(parts) > 7:
-        razao_social_parts = parts[1:-5]
-        # Junta as partes da razão social e coloca entre aspas para tratar como um campo único
-        razao_social = f'"{" ".join(razao_social_parts)}"'
-        # Remonta a linha com a razão social corrigida
-        corrected_parts = [parts[0]] + [razao_social] + parts[-5:]
-        return delimiter.join(corrected_parts) + '\n'
-    return line
-
-def empresa_chunk_generator(filepath, chunksize):
-    """
-    Um gerador que lê um arquivo de empresa em pedaços, limpa as linhas
-    e retorna um DataFrame do pandas para cada pedaço.
-    """
-    buffer = io.StringIO()
-    lines_in_buffer = 0
-    with open(filepath, 'r', encoding='latin-1') as f:
-        for line in f:
-            buffer.write(clean_empresa_line(line))
-            lines_in_buffer += 1
-            if lines_in_buffer >= chunksize:
-                buffer.seek(0)
-                yield pd.read_csv(buffer, sep=';', header=None, names=empresa_cols, dtype=empresa_dtypes, quotechar='"')
-                # Reseta o buffer
-                buffer.close()
-                buffer = io.StringIO()
-                lines_in_buffer = 0
-    # Processa o que sobrou no buffer
-    if lines_in_buffer > 0:
-        buffer.seek(0)
-        yield pd.read_csv(buffer, sep=';', header=None, names=empresa_cols, dtype=empresa_dtypes, quotechar='"')
-        buffer.close()
-
-# #%%
-# # Arquivos de empresa:
-empresa_insert_start = time.time()
-print("""
-#######################
-## Arquivos de EMPRESA:
-#######################
-""")
-
-CHUNKSIZE = 500_000 # Reduzido para acomodar o pré-processamento em memória
-# Schema para EMPRESAS
-empresa_cols = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
-empresa_dtypes = {
-    'cnpj_basico': str,
-    'razao_social': str,
-    'natureza_juridica': 'Int32',
-    'qualificacao_responsavel': 'Int32',
-    'capital_social': str, # Lemos como string para tratar a vírgula
-    'porte_empresa': 'Int32',
-    'ente_federativo_responsavel': str
+# Definição dos schemas para cada tipo de arquivo
+schemas = {
+    'empresa': {
+        'cols': ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel'],
+        'dtype': {col: str for col in ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']}
+    },
+    'estabelecimento': {
+        'cols': [
+            'cnpj_basico', 'cnpj_ordem', 'cnpj_dv', 'identificador_matriz_filial', 'nome_fantasia',
+            'situacao_cadastral', 'data_situacao_cadastral', 'motivo_situacao_cadastral', 'nome_cidade_exterior', 'pais',
+            'data_inicio_atividade', 'cnae_fiscal_principal', 'cnae_fiscal_secundaria', 'tipo_logradouro', 'logradouro',
+            'numero', 'complemento', 'bairro', 'cep', 'uf', 'municipio',
+            'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2', 'ddd_fax', 'fax',
+            'correio_eletronico', 'situacao_especial', 'data_situacao_especial'
+        ],
+        'dtype': {col: str for col in [
+            'cnpj_basico', 'cnpj_ordem', 'cnpj_dv', 'identificador_matriz_filial', 'nome_fantasia',
+            'situacao_cadastral', 'data_situacao_cadastral', 'motivo_situacao_cadastral', 'nome_cidade_exterior', 'pais',
+            'data_inicio_atividade', 'cnae_fiscal_principal', 'cnae_fiscal_secundaria', 'tipo_logradouro', 'logradouro',
+            'numero', 'complemento', 'bairro', 'cep', 'uf', 'municipio',
+            'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2', 'ddd_fax', 'fax',
+            'correio_eletronico', 'situacao_especial', 'data_situacao_especial'
+        ]}
+    },
+    'socios': {
+        'cols': [
+            'cnpj_basico', 'identificador_socio', 'nome_socio_razao_social', 'cpf_cnpj_socio', 'qualificacao_socio',
+            'data_entrada_sociedade', 'pais', 'representante_legal', 'nome_do_representante',
+            'qualificacao_representante_legal', 'faixa_etaria'
+        ],
+        'dtype': {col: str for col in [
+            'cnpj_basico', 'identificador_socio', 'nome_socio_razao_social', 'cpf_cnpj_socio', 'qualificacao_socio',
+            'data_entrada_sociedade', 'pais', 'representante_legal', 'nome_do_representante',
+            'qualificacao_representante_legal', 'faixa_etaria'
+        ]}
+    },
+    'simples': {
+        'cols': [
+            'cnpj_basico', 'opcao_pelo_simples', 'data_opcao_simples', 'data_exclusao_simples',
+            'opcao_mei', 'data_opcao_mei', 'data_exclusao_mei'
+        ],
+        'dtype': {col: str for col in [
+            'cnpj_basico', 'opcao_pelo_simples', 'data_opcao_simples', 'data_exclusao_simples',
+            'opcao_mei', 'data_opcao_mei', 'data_exclusao_mei'
+        ]}
+    },
+    'cnae': {'cols': ['codigo', 'descricao'], 'dtype': {'codigo': str, 'descricao': str}},
+    'moti': {'cols': ['codigo', 'descricao'], 'dtype': {'codigo': str, 'descricao': str}},
+    'munic': {'cols': ['codigo', 'descricao'], 'dtype': {'codigo': str, 'descricao': str}},
+    'natju': {'cols': ['codigo', 'descricao'], 'dtype': {'codigo': str, 'descricao': str}},
+    'pais': {'cols': ['codigo', 'descricao'], 'dtype': {'codigo': str, 'descricao': str}},
+    'quals': {'cols': ['codigo', 'descricao'], 'dtype': {'codigo': str, 'descricao': str}}
 }
 
-for e in range(0, len(arquivos_empresa)):
-    print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
-    extracted_file_path = os.path.join(extracted_files, arquivos_empresa[e])
+# Mapeamento de arquivos para seus schemas
+file_to_schema_map = {
+    'empresa': arquivos_empresa,
+    'estabelecimento': arquivos_estabelecimento,
+    'socios': arquivos_socios,
+    'simples': arquivos_simples,
+    'cnae': arquivos_cnae,
+    'moti': arquivos_moti,
+    'munic': arquivos_munic,
+    'natju': arquivos_natju,
+    'pais': arquivos_pais,
+    'quals': arquivos_quals,
+}
 
-    reader = empresa_chunk_generator(extracted_file_path, CHUNKSIZE)
+CHUNKSIZE = 500_000
 
-    for i, chunk in enumerate(reader):
-        chunk['capital_social'] = chunk['capital_social'].str.replace(',', '.').astype(float)
-
-        # Trata colunas que deveriam ser inteiras mas podem ter vindo como float string (ex: "0.0")
-        chunk['qualificacao_responsavel'] = pd.to_numeric(chunk['qualificacao_responsavel'], errors='coerce').fillna(0).astype(int)
-        chunk['porte_empresa'] = pd.to_numeric(chunk['porte_empresa'], errors='coerce').fillna(0).astype(int)
-
-        copy_from_stringio(cur, chunk, 'empresa')
-        print(f'\rChunk {i} do arquivo {arquivos_empresa[e]} inserido com sucesso no banco de dados!', end='')
-
-    print(f'\nArquivo {arquivos_empresa[e]} finalizado.')
-    gc.collect()
-
-print('Arquivos de empresa finalizados!')
-empresa_insert_end = time.time()
-empresa_Tempo_insert = round((empresa_insert_end - empresa_insert_start))
-print('Tempo de execução do processo de empresa (em segundos): ' + str(empresa_Tempo_insert))
-
-#%%
-def clean_estabelecimento_line(line, delimiter=';'):
+def process_table(table_name, files, schema):
     """
-    Limpa uma linha do arquivo de estabelecimento, lidando com delimitadores extras
-    em vários campos de texto.
-    """
-    parts = line.strip().split(delimiter)
-    if len(parts) > 30:
-        # A lógica assume que os 10 últimos campos (de ddd_1 em diante) e os 11 primeiros
-        # (até data_inicio_atividade) estão corretos. Os campos problemáticos estão no meio.
-        middle_start = 11
-        middle_end = -10
-        middle_parts = parts[middle_start:middle_end]
-
-        # Junta as partes do meio e coloca entre aspas
-        reconstructed_middle = f'"{" ".join(middle_parts)}"'
-
-        # Remonta a linha com o meio corrigido
-        # Esta é uma simplificação. A lógica ideal exigiria identificar qual campo específico
-        # continha o delimitador extra, o que é muito complexo. A abordagem mais segura
-        # é ler com um delimitador que não existe nos dados, como '|', após substituir.
-        # Por enquanto, esta heurística de juntar o "meio" é a melhor tentativa.
-        # NOTE: This is a heuristic and might fail if the structure is different than assumed.
-        # A melhor abordagem seria um parser de CSV mais robusto ou um delimitador diferente.
-        # Vamos tentar uma abordagem mais simples: usar o parser do python com error_bad_lines=False
-        # (obsoleto) ou, melhor, tratar exceções.
-
-        # A heurística de reconstrução é muito arriscada. Em vez disso, vamos confiar no parser
-        # do pandas com quotechar, que é a forma correta. O erro anterior pode ter sido
-        # causado por não ter lido os dados em um gerador de chunks limpos.
-        # Se os erros persistirem, a única solução 100% robusta é um pré-processamento
-        # que converta o delimitador, mas isso é muito lento.
-        # Vamos manter o código como está para esta tabela e reavaliar se o erro persiste.
-        # O erro anterior no log era claro, vamos tentar aplicar a mesma lógica de limpeza.
-
-        # Reconstrução baseada na ideia de que os campos problemáticos estão no meio
-        # (nome_fantasia, logradouro, complemento, bairro).
-        # Assumindo que os primeiros 4 e os últimos 19 campos estão corretos.
-        if len(parts) > 30:
-             # Exemplo: CNPJ;ORDEM;DV;ID;NOME FANTASIA;SIT;DATA_SIT;...
-             # Os campos de texto mais prováveis de conter ';' são nome_fantasia e os de endereço.
-             # Heurística: [0:4] e [-19:] estão corretos. O meio é o problemático.
-             middle_parts = parts[4:-19]
-             reconstructed_middle = f'"{" ".join(middle_parts)}"'
-             corrected_parts = parts[:4] + [reconstructed_middle] + parts[-19:]
-             return delimiter.join(corrected_parts) + '\n'
-
-    return line
-
-def estabelecimento_chunk_generator(filepath, chunksize):
-    buffer = io.StringIO()
-    lines_in_buffer = 0
-    with open(filepath, 'r', encoding='latin-1') as f:
-        for line in f:
-            # A limpeza para estabelecimento é mais complexa e arriscada.
-            # Por enquanto, vamos confiar no parser do pandas, que é a ferramenta correta.
-            # A lógica de limpeza será aplicada se o erro persistir.
-            buffer.write(line) # Sem limpeza por enquanto
-            lines_in_buffer += 1
-            if lines_in_buffer >= chunksize:
-                buffer.seek(0)
-                yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"', on_bad_lines='warn')
-                buffer.close()
-                buffer = io.StringIO()
-                lines_in_buffer = 0
-    if lines_in_buffer > 0:
-        buffer.seek(0)
-        yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"', on_bad_lines='warn')
-        buffer.close()
-
-def clean_estabelecimento_line(line, delimiter=';'):
-    """
-    Limpa uma linha do arquivo de estabelecimento, lidando com delimitadores extras.
-    Assume que os primeiros 3 campos e os 19 últimos são sempre bem formatados.
-    Os campos problemáticos (nome_fantasia, endereço) ficam no meio.
-    """
-    # Remove aspas para evitar problemas com o split
-    line_no_quotes = line.strip().replace('"', '')
-    parts = line_no_quotes.split(delimiter)
-
-    if len(parts) > 30:
-        # Heurística: os primeiros 4 campos e os últimos 19 estão corretos.
-        middle_parts = parts[4:-19]
-        reconstructed_middle = " ".join(middle_parts) # Junta o campo quebrado
-
-        # Remonta a linha com o campo do meio corrigido e entre aspas
-        corrected_parts = parts[:4] + [f'"{reconstructed_middle}"'] + parts[-19:]
-        return delimiter.join(corrected_parts) + '\n'
-    return line # Retorna a linha original se ela parece correta
-
-def estabelecimento_chunk_generator(filepath, chunksize):
-    """
-    Um gerador que lê um arquivo de estabelecimento em pedaços, limpa as linhas
-    e retorna um DataFrame do pandas para cada pedaço.
-    """
-    buffer = io.StringIO()
-    lines_in_buffer = 0
-    with open(filepath, 'r', encoding='latin-1') as f:
-        for line in f:
-            buffer.write(clean_estabelecimento_line(line))
-            lines_in_buffer += 1
-            if lines_in_buffer >= chunksize:
-                buffer.seek(0)
-                yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"')
-                buffer.close()
-                buffer = io.StringIO()
-                lines_in_buffer = 0
-    if lines_in_buffer > 0:
-        buffer.seek(0)
-        yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"')
-        buffer.close()
-
-# Arquivos de estabelecimento:
-estabelecimento_insert_start = time.time()
-print("""
-###############################
-## Arquivos de ESTABELECIMENTO:
-###############################
-""")
-
-
-print('Tem %i arquivos de estabelecimento!' % len(arquivos_estabelecimento))
-for e in range(0, len(arquivos_estabelecimento)):
-    print('Trabalhando no arquivo: '+arquivos_estabelecimento[e]+' [...]')
-
-    # Schema para ESTABELECIMENTOS
-    est_cols = [
-        'cnpj_basico', 'cnpj_ordem', 'cnpj_dv', 'identificador_matriz_filial', 'nome_fantasia',
-        'situacao_cadastral', 'data_situacao_cadastral', 'motivo_situacao_cadastral', 'nome_cidade_exterior', 'pais',
-        'data_inicio_atividade', 'cnae_fiscal_principal', 'cnae_fiscal_secundaria', 'tipo_logradouro', 'logradouro',
-        'numero', 'complemento', 'bairro', 'cep', 'uf', 'municipio',
-        'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2', 'ddd_fax', 'fax',
-        'correio_eletronico', 'situacao_especial', 'data_situacao_especial'
-    ]
-    est_dtypes = {col: str for col in est_cols}
-
-    extracted_file_path = os.path.join(extracted_files, arquivos_estabelecimento[e])
-
-    reader = estabelecimento_chunk_generator(extracted_file_path, CHUNKSIZE)
-
-    for i, chunk in enumerate(reader):
-        copy_from_stringio(cur, chunk, 'estabelecimento')
-        print(f'\rChunk {i} do arquivo {arquivos_estabelecimento[e]} inserido com sucesso!', end='')
-
-    print(f'\nArquivo {arquivos_estabelecimento[e]} finalizado.')
-    gc.collect()
-
-print('Arquivos de estabelecimento finalizados!')
-estabelecimento_insert_end = time.time()
-estabelecimento_Tempo_insert = round((estabelecimento_insert_end - estabelecimento_insert_start))
-print('Tempo de execução do processo de estabelecimento (em segundos): ' + str(estabelecimento_Tempo_insert))
-
-#%%
-# Arquivos de socios:
-socios_insert_start = time.time()
-print("""
-######################
-## Arquivos de SOCIOS:
-######################
-""")
-
-
-# Schema para SOCIOS
-socios_cols = [
-    'cnpj_basico', 'identificador_socio', 'nome_socio_razao_social', 'cpf_cnpj_socio', 'qualificacao_socio',
-    'data_entrada_sociedade', 'pais', 'representante_legal', 'nome_do_representante',
-    'qualificacao_representante_legal', 'faixa_etaria'
-]
-socios_dtypes = {col: str for col in socios_cols} # Ler tudo como string
-
-for e in range(0, len(arquivos_socios)):
-    print('Trabalhando no arquivo: '+arquivos_socios[e]+' [...]')
-    extracted_file_path = os.path.join(extracted_files, arquivos_socios[e])
-
-    reader = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                          sep=';',
-                          header=None,
-                          names=socios_cols,
-                          dtype=socios_dtypes,
-                          encoding='latin-1',
-                          chunksize=CHUNKSIZE,
-                          quotechar='"',
-                          engine='python'
-    )
-
-    for i, chunk in enumerate(reader):
-        copy_from_stringio(cur, chunk, 'socios')
-        print(f'\rChunk {i} do arquivo {arquivos_socios[e]} inserido com sucesso no banco de dados!', end='')
-
-    print(f'\nArquivo {arquivos_socios[e]} finalizado.')
-
-    gc.collect()
-
-print('Arquivos de socios finalizados!')
-socios_insert_end = time.time()
-socios_Tempo_insert = round((socios_insert_end - socios_insert_start))
-print('Tempo de execução do processo de sócios (em segundos): ' + str(socios_Tempo_insert))
-
-#%%
-# Arquivos de simples:
-simples_insert_start = time.time()
-print("""
-################################
-## Arquivos do SIMPLES NACIONAL:
-################################
-""")
-
-
-for e in range(0, len(arquivos_simples)):
-    print('Trabalhando no arquivo: '+arquivos_simples[e]+' [...]')
-    try:
-        del simples
-    except:
-        pass
-
-    # Schema para SIMPLES
-    simples_cols = [
-        'cnpj_basico', 'opcao_pelo_simples', 'data_opcao_simples', 'data_exclusao_simples',
-        'opcao_mei', 'data_opcao_mei', 'data_exclusao_mei'
-    ]
-    simples_dtypes = {col: str for col in simples_cols}
-
-    # Verificar tamanho do arquivo:
-    print('Lendo o arquivo ' + arquivos_simples[e]+' [...]')
-    extracted_file_path = os.path.join(extracted_files, arquivos_simples[e])
-
-    simples_lenght = sum(1 for line in open(extracted_file_path, "r", encoding='latin-1'))
-    print('Linhas no arquivo do Simples '+ arquivos_simples[e] +': '+str(simples_lenght))
-
-    tamanho_das_partes = 1000000 # Registros por carga
-    partes = round(simples_lenght / tamanho_das_partes)
-    nrows = tamanho_das_partes
-    skiprows = 0
-
-    print('Este arquivo será dividido em ' + str(partes) + ' partes para inserção no banco de dados')
-
-    for i in range(0, partes):
-        print('Iniciando a parte ' + str(i+1) + ' [...]')
-        simples = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                              sep=';',
-                              nrows=nrows,
-                              skiprows=skiprows,
-                              header=None,
-                              names=simples_cols,
-                              dtype=simples_dtypes,
-                              encoding='latin-1',
-                              quotechar='"',
-                              engine='python'
-        )
-
-        skiprows = skiprows+nrows
-
-        # Gravar dados no banco:
-        # simples
-        copy_from_stringio(cur, simples, 'simples')
-        print(f'\rArquivo {arquivos_simples[e]} / parte {i+1} de {partes} inserido com sucesso!', end='')
-
-        try:
-            del simples
-        except:
-            pass
-
-try:
-    del simples
-except:
-    pass
-
-print('Arquivos do simples finalizados!')
-simples_insert_end = time.time()
-simples_Tempo_insert = round((simples_insert_end - simples_insert_start))
-print('Tempo de execução do processo do Simples Nacional (em segundos): ' + str(simples_Tempo_insert))
-
-#%%
-def process_lookup_table(files, table_name, file_pattern, columns, dtypes):
-    """
-    Função genérica para processar tabelas de lookup (domínio).
+    Função genérica para processar e carregar dados de qualquer tabela.
     """
     insert_start = time.time()
-    print(f"\n######################\n## Arquivos de {table_name.upper()}:\n######################")
+    print(f"\n#######################\n## Arquivos de {table_name.upper()}:\n#######################")
 
-    for e in range(0, len(files)):
-        print(f'Trabalhando no arquivo: {files[e]} [...]')
-        extracted_file_path = os.path.join(extracted_files, files[e])
+    total_chunks = 0
+    for file_name in files:
+        print(f'Trabalhando no arquivo: {file_name} [...]')
+        extracted_file_path = os.path.join(extracted_files, file_name)
 
-        df = pd.read_csv(
-            filepath_or_buffer=extracted_file_path,
+        # Sanitiza o arquivo antes de processar
+        sanitized_buffer = sanitize_file(extracted_file_path, len(schema['cols']))
+
+        # Pula o cabeçalho se o buffer não for vazio
+        if sanitized_buffer.tell() > 0:
+            sanitized_buffer.seek(0)
+
+        reader = pd.read_csv(
+            sanitized_buffer,
             sep=';',
             header=None,
-            names=columns,
-            dtype=dtypes,
+            names=schema['cols'],
+            dtype=schema['dtype'],
             encoding='latin-1',
             quotechar='"',
-            engine='python'
+            chunksize=CHUNKSIZE,
+            on_bad_lines='warn' # A sanitização deve prevenir isso, mas é uma segurança extra
         )
 
-        copy_from_stringio(cur, df, table_name)
-        print(f'Arquivo {files[e]} inserido com sucesso na tabela {table_name}!')
+        for i, chunk in enumerate(reader):
+            # O pós-processamento específico (como conversão de capital social) foi removido
+            # porque a tabela agora aceita VARCHAR. A conversão de tipo deve ser feita no banco de dados.
+            copy_from_stringio(cur, chunk, table_name)
+            total_chunks += 1
+            print(f'\rChunk {i+1} do arquivo {file_name} inserido com sucesso!', end='')
+
+        print(f'\nArquivo {file_name} finalizado.')
+        gc.collect()
 
     insert_end = time.time()
     tempo_insert = round(insert_end - insert_start)
-    print(f'Arquivos de {table_name} finalizados! Tempo de execução (em segundos): {tempo_insert}')
+    print(f'Arquivos de {table_name} finalizados! {total_chunks} chunks inseridos. Tempo de execução: {tempo_insert}s')
 
-# Processar todas as tabelas de lookup
-lookup_columns = ['codigo', 'descricao']
-lookup_dtypes = {'codigo': 'Int32', 'descricao': str}
-
-process_lookup_table(arquivos_cnae, 'cnae', 'CNAECSV', lookup_columns, lookup_dtypes)
-process_lookup_table(arquivos_moti, 'moti', 'MOTICSV', lookup_columns, lookup_dtypes)
-process_lookup_table(arquivos_munic, 'munic', 'MUNICCSV', lookup_columns, lookup_dtypes)
-process_lookup_table(arquivos_natju, 'natju', 'NATJUCSV', lookup_columns, lookup_dtypes)
-process_lookup_table(arquivos_pais, 'pais', 'PAISCSV', lookup_columns, lookup_dtypes)
-process_lookup_table(arquivos_quals, 'quals', 'QUALSCSV', lookup_columns, lookup_dtypes)
+# Executa o processo para todas as tabelas
+for table_name, files in file_to_schema_map.items():
+    if files: # Apenas processa se houver arquivos para a tabela
+        process_table(table_name, files, schemas[table_name])
 
 #%%
 insert_end = time.time()
