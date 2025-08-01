@@ -392,6 +392,47 @@ cur = conn.cursor()
 # Cria/recria todas as tabelas para garantir um ambiente limpo
 create_tables(cur)
 
+def clean_empresa_line(line, delimiter=';'):
+    """
+    Limpa uma linha do arquivo de empresa, lidando com delimitadores extras
+    no campo de razão social.
+    """
+    parts = line.strip().split(delimiter)
+    # A lógica assume que os 5 últimos campos estão sempre corretos.
+    # O campo problemático (razão social) está entre o primeiro e os 5 últimos.
+    if len(parts) > 7:
+        razao_social_parts = parts[1:-5]
+        # Junta as partes da razão social e coloca entre aspas para tratar como um campo único
+        razao_social = f'"{" ".join(razao_social_parts)}"'
+        # Remonta a linha com a razão social corrigida
+        corrected_parts = [parts[0]] + [razao_social] + parts[-5:]
+        return delimiter.join(corrected_parts) + '\n'
+    return line
+
+def empresa_chunk_generator(filepath, chunksize):
+    """
+    Um gerador que lê um arquivo de empresa em pedaços, limpa as linhas
+    e retorna um DataFrame do pandas para cada pedaço.
+    """
+    buffer = io.StringIO()
+    lines_in_buffer = 0
+    with open(filepath, 'r', encoding='latin-1') as f:
+        for line in f:
+            buffer.write(clean_empresa_line(line))
+            lines_in_buffer += 1
+            if lines_in_buffer >= chunksize:
+                buffer.seek(0)
+                yield pd.read_csv(buffer, sep=';', header=None, names=empresa_cols, dtype=empresa_dtypes, quotechar='"')
+                # Reseta o buffer
+                buffer.close()
+                buffer = io.StringIO()
+                lines_in_buffer = 0
+    # Processa o que sobrou no buffer
+    if lines_in_buffer > 0:
+        buffer.seek(0)
+        yield pd.read_csv(buffer, sep=';', header=None, names=empresa_cols, dtype=empresa_dtypes, quotechar='"')
+        buffer.close()
+
 # #%%
 # # Arquivos de empresa:
 empresa_insert_start = time.time()
@@ -401,7 +442,7 @@ print("""
 #######################
 """)
 
-CHUNKSIZE = 1_000_000
+CHUNKSIZE = 500_000 # Reduzido para acomodar o pré-processamento em memória
 # Schema para EMPRESAS
 empresa_cols = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
 empresa_dtypes = {
@@ -418,28 +459,14 @@ for e in range(0, len(arquivos_empresa)):
     print('Trabalhando no arquivo: '+arquivos_empresa[e]+' [...]')
     extracted_file_path = os.path.join(extracted_files, arquivos_empresa[e])
 
-    reader = pd.read_csv(filepath_or_buffer=extracted_file_path,
-                          sep=';',
-                          header=None,
-                          names=empresa_cols,
-                          dtype=empresa_dtypes,
-                          encoding='latin-1',
-                          chunksize=CHUNKSIZE,
-                          quotechar='"',
-                          engine='python'
-    )
+    reader = empresa_chunk_generator(extracted_file_path, CHUNKSIZE)
 
     for i, chunk in enumerate(reader):
-        # A linha de cabeçalho é atribuída novamente dentro do loop, o que é redundante, mas inofensivo.
-        # O importante é o tratamento de capital_social e a inserção.
         chunk['capital_social'] = chunk['capital_social'].str.replace(',', '.').astype(float)
-
-        # Gravar dados no banco:
         copy_from_stringio(cur, chunk, 'empresa')
         print(f'\rChunk {i} do arquivo {arquivos_empresa[e]} inserido com sucesso no banco de dados!', end='')
 
     print(f'\nArquivo {arquivos_empresa[e]} finalizado.')
-
     gc.collect()
 
 print('Arquivos de empresa finalizados!')
