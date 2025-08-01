@@ -63,6 +63,94 @@ def makedirs(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
+def create_tables(cursor):
+    """
+    Cria todas as tabelas no banco de dados, dropando as existentes antes.
+    Isso garante que cada execução comece com um ambiente limpo.
+    """
+    print("Criando/recriando tabelas no banco de dados...")
+
+    # DDL para cada tabela
+    ddl_commands = {
+        "empresa": """CREATE TABLE empresa (
+            cnpj_basico VARCHAR(8),
+            razao_social VARCHAR,
+            natureza_juridica INTEGER,
+            qualificacao_responsavel INTEGER,
+            capital_social FLOAT,
+            porte_empresa INTEGER,
+            ente_federativo_responsavel VARCHAR
+        );""",
+        "estabelecimento": """CREATE TABLE estabelecimento (
+            cnpj_basico VARCHAR(8),
+            cnpj_ordem VARCHAR(4),
+            cnpj_dv VARCHAR(2),
+            identificador_matriz_filial INTEGER,
+            nome_fantasia VARCHAR,
+            situacao_cadastral INTEGER,
+            data_situacao_cadastral VARCHAR(8),
+            motivo_situacao_cadastral INTEGER,
+            nome_cidade_exterior VARCHAR,
+            pais VARCHAR(3),
+            data_inicio_atividade VARCHAR(8),
+            cnae_fiscal_principal INTEGER,
+            cnae_fiscal_secundaria VARCHAR,
+            tipo_logradouro VARCHAR,
+            logradouro VARCHAR,
+            numero VARCHAR,
+            complemento VARCHAR,
+            bairro VARCHAR,
+            cep VARCHAR(8),
+            uf VARCHAR(2),
+            municipio INTEGER,
+            ddd_1 VARCHAR,
+            telefone_1 VARCHAR,
+            ddd_2 VARCHAR,
+            telefone_2 VARCHAR,
+            ddd_fax VARCHAR,
+            fax VARCHAR,
+            correio_eletronico VARCHAR,
+            situacao_especial VARCHAR,
+            data_situacao_especial VARCHAR(8)
+        );""",
+        "socios": """CREATE TABLE socios (
+            cnpj_basico VARCHAR(8),
+            identificador_socio INTEGER,
+            nome_socio_razao_social VARCHAR,
+            cpf_cnpj_socio VARCHAR(14),
+            qualificacao_socio INTEGER,
+            data_entrada_sociedade VARCHAR(8),
+            pais VARCHAR(3),
+            representante_legal VARCHAR(14),
+            nome_do_representante VARCHAR,
+            qualificacao_representante_legal INTEGER,
+            faixa_etaria INTEGER
+        );""",
+        "simples": """CREATE TABLE simples (
+            cnpj_basico VARCHAR(8),
+            opcao_pelo_simples VARCHAR(1),
+            data_opcao_simples VARCHAR(8),
+            data_exclusao_simples VARCHAR(8),
+            opcao_mei VARCHAR(1),
+            data_opcao_mei VARCHAR(8),
+            data_exclusao_mei VARCHAR(8)
+        );""",
+        "cnae": "CREATE TABLE cnae (codigo INTEGER, descricao VARCHAR);",
+        "moti": "CREATE TABLE moti (codigo INTEGER, descricao VARCHAR);",
+        "munic": "CREATE TABLE munic (codigo INTEGER, descricao VARCHAR);",
+        "natju": "CREATE TABLE natju (codigo INTEGER, descricao VARCHAR);",
+        "pais": "CREATE TABLE pais (codigo INTEGER, descricao VARCHAR);",
+        "quals": "CREATE TABLE quals (codigo INTEGER, descricao VARCHAR);"
+    }
+
+    for table_name, ddl in ddl_commands.items():
+        print(f"  - Recriando tabela '{table_name}'...")
+        cursor.execute(f"DROP TABLE IF EXISTS {table_name};")
+        cursor.execute(ddl)
+
+    conn.commit()
+    print("Tabelas criadas com sucesso.")
+
 def copy_from_stringio(cursor, df, table_name):
     """
     Usa o método copy_from do psycopg2 para inserir um dataframe do pandas
@@ -265,25 +353,25 @@ arquivos_pais = []
 arquivos_quals = []
 for item in Items:
     item_upper = item.upper()
-    if 'EMPRESAS' in item_upper:
+    if 'EMPRECSV' in item_upper:
         arquivos_empresa.append(item)
-    elif 'ESTABELECIMENTOS' in item_upper:
+    elif 'ESTABELE' in item_upper:
         arquivos_estabelecimento.append(item)
-    elif 'SOCIOS' in item_upper:
+    elif 'SOCIOCSV' in item_upper:
         arquivos_socios.append(item)
-    elif 'SIMPLES' in item_upper:
+    elif 'SIMPLES.CSV' in item_upper:
         arquivos_simples.append(item)
-    elif 'CNAES' in item_upper:
+    elif 'CNAECSV' in item_upper:
         arquivos_cnae.append(item)
-    elif 'MOTIVOS' in item_upper:
+    elif 'MOTICSV' in item_upper:
         arquivos_moti.append(item)
-    elif 'MUNICIPIOS' in item_upper:
+    elif 'MUNICCSV' in item_upper:
         arquivos_munic.append(item)
-    elif 'NATUREZAS' in item_upper:
+    elif 'NATJUCSV' in item_upper:
         arquivos_natju.append(item)
-    elif 'PAISES' in item_upper:
+    elif 'PAISCSV' in item_upper:
         arquivos_pais.append(item)
-    elif 'QUALIFICACOES' in item_upper:
+    elif 'QUALSCSV' in item_upper:
         arquivos_quals.append(item)
     else:
         print(f"AVISO: Arquivo '{item}' não classificado e será ignorado.")
@@ -301,6 +389,9 @@ database=getEnv('DB_NAME')
 conn = psycopg2.connect('dbname='+database+' '+'user='+user+' '+'host='+host+' '+'port='+port+' '+'password='+passw)
 cur = conn.cursor()
 
+# Cria/recria todas as tabelas para garantir um ambiente limpo
+create_tables(cur)
+
 # #%%
 # # Arquivos de empresa:
 empresa_insert_start = time.time()
@@ -309,10 +400,6 @@ print("""
 ## Arquivos de EMPRESA:
 #######################
 """)
-
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "empresa";')
-conn.commit()
 
 CHUNKSIZE = 1_000_000
 empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
@@ -358,9 +445,6 @@ print("""
 ###############################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "estabelecimento";')
-conn.commit()
 
 print('Tem %i arquivos de estabelecimento!' % len(arquivos_estabelecimento))
 for e in range(0, len(arquivos_estabelecimento)):
@@ -455,9 +539,6 @@ print("""
 ######################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "socios";')
-conn.commit()
 
 socios_dtypes = {0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32', 5: 'Int32', 6: 'Int32',
                  7: object, 8: object, 9: 'Int32', 10: 'Int32'}
@@ -498,9 +579,6 @@ print("""
 ################################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "simples";')
-conn.commit()
 
 for e in range(0, len(arquivos_simples)):
     print('Trabalhando no arquivo: '+arquivos_simples[e]+' [...]')
@@ -581,9 +659,6 @@ print("""
 ######################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "cnae";')
-conn.commit()
 
 for e in range(0, len(arquivos_cnae)):
     print('Trabalhando no arquivo: '+arquivos_cnae[e]+' [...]')
@@ -626,9 +701,6 @@ print("""
 #########################################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "moti";')
-conn.commit()
 
 for e in range(0, len(arquivos_moti)):
     print('Trabalhando no arquivo: '+arquivos_moti[e]+' [...]')
@@ -671,9 +743,6 @@ print("""
 ##########################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "munic";')
-conn.commit()
 
 for e in range(0, len(arquivos_munic)):
     print('Trabalhando no arquivo: '+arquivos_munic[e]+' [...]')
@@ -716,9 +785,6 @@ print("""
 #################################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "natju";')
-conn.commit()
 
 for e in range(0, len(arquivos_natju)):
     print('Trabalhando no arquivo: '+arquivos_natju[e]+' [...]')
@@ -761,9 +827,6 @@ print("""
 ######################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "pais";')
-conn.commit()
 
 for e in range(0, len(arquivos_pais)):
     print('Trabalhando no arquivo: '+arquivos_pais[e]+' [...]')
@@ -806,9 +869,6 @@ print("""
 ######################################
 """)
 
-# Drop table antes do insert
-cur.execute('DROP TABLE IF EXISTS "quals";')
-conn.commit()
 
 for e in range(0, len(arquivos_quals)):
     print('Trabalhando no arquivo: '+arquivos_quals[e]+' [...]')
