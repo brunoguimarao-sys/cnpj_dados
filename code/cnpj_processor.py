@@ -7,6 +7,8 @@ import bs4 as bs
 import os
 import pandas as pd
 import pyodbc
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 import re
 import sys
 import time
@@ -171,33 +173,34 @@ def bar_progress(current, total, width=80):
 # FUNÇÕES DE BANCO DE DADOS
 # =============================================================================
 
-def get_db_connection(config):
+def get_db_engine(config):
     """
-    Estabelece e retorna uma conexão com o banco de dados SQL Server.
+    Cria e retorna um engine do SQLAlchemy para o SQL Server.
     """
-    conn_str = (
-        f'DRIVER={{{config["db_driver"]}}};'
-        f'SERVER={config["db_server"]};'
-        f'DATABASE={config["db_name"]};'
-        f'UID={config["db_user"]};'
-        f'PWD={config["db_password"]}'
+    connection_url = URL.create(
+        "mssql+pyodbc",
+        username=config["db_user"],
+        password=config["db_password"],
+        host=config["db_server"],
+        database=config["db_name"],
+        query={"driver": config["db_driver"]},
     )
+
     try:
-        conn = pyodbc.connect(conn_str)
-        print("\nConexão com o SQL Server bem-sucedida!")
-        return conn
-    except pyodbc.Error as ex:
-        sqlstate = ex.args[0]
-        print(f"ERRO: Falha na conexão com o SQL Server. SQLSTATE: {sqlstate}")
-        print(ex)
+        engine = create_engine(connection_url)
+        # Testa a conexão
+        with engine.connect() as connection:
+            print("\nConexão com o SQL Server (via SQLAlchemy) bem-sucedida!")
+        return engine
+    except Exception as e:
+        print(f"ERRO: Falha ao criar engine de conexão com o SQL Server. Erro: {e}")
         sys.exit(1)
 
-def setup_database_tables(conn):
+def setup_database_tables(engine):
     """
-    Cria ou recria todas as tabelas necessárias no banco de dados.
+    Cria ou recria todas as tabelas necessárias no banco de dados usando o engine do SQLAlchemy.
     """
     print("\n--- CONFIGURANDO TABELAS NO BANCO DE DADOS ---")
-    cursor = conn.cursor()
 
     ddl_commands = {
         "empresa": """CREATE TABLE empresa (
@@ -235,37 +238,33 @@ def setup_database_tables(conn):
         "quals": "CREATE TABLE quals (codigo VARCHAR(2), descricao VARCHAR(MAX));"
     }
 
-    for table_name, ddl in ddl_commands.items():
-        print(f"  - Recriando tabela '{table_name}'...")
-        cursor.execute(f"IF OBJECT_ID('{table_name}', 'U') IS NOT NULL DROP TABLE {table_name};")
-        cursor.execute(ddl)
-
-    conn.commit()
-    cursor.close()
+    with engine.connect() as connection:
+        for table_name, ddl in ddl_commands.items():
+            print(f"  - Recriando tabela '{table_name}'...")
+            connection.execute(f"IF OBJECT_ID('{table_name}', 'U') IS NOT NULL DROP TABLE {table_name};")
+            connection.execute(ddl)
+        connection.commit()
     print("Tabelas configuradas com sucesso.")
 
-def create_database_indexes(conn):
+def create_database_indexes(engine):
     """Cria índices nas tabelas para otimizar as consultas."""
     print("\n--- CRIANDO ÍNDICES NO BANCO DE DADOS ---")
-    cursor = conn.cursor()
-    try:
-        cursor.execute("CREATE INDEX idx_empresa_cnpj ON empresa(cnpj_basico);")
-        cursor.execute("CREATE INDEX idx_estabelecimento_cnpj ON estabelecimento(cnpj_basico);")
-        cursor.execute("CREATE INDEX idx_socios_cnpj ON socios(cnpj_basico);")
-        cursor.execute("CREATE INDEX idx_simples_cnpj ON simples(cnpj_basico);")
-        conn.commit()
-        print("Índices criados com sucesso para a coluna `cnpj_basico`.")
-    except pyodbc.Error as e:
-        print(f"AVISO: Não foi possível criar os índices. Eles podem já existir. Erro: {e}")
-        conn.rollback()
-    finally:
-        cursor.close()
+    with engine.connect() as connection:
+        try:
+            connection.execute("CREATE INDEX idx_empresa_cnpj ON empresa(cnpj_basico);")
+            connection.execute("CREATE INDEX idx_estabelecimento_cnpj ON estabelecimento(cnpj_basico);")
+            connection.execute("CREATE INDEX idx_socios_cnpj ON socios(cnpj_basico);")
+            connection.execute("CREATE INDEX idx_simples_cnpj ON simples(cnpj_basico);")
+            connection.commit()
+            print("Índices criados com sucesso para a coluna `cnpj_basico`.")
+        except Exception as e:
+            print(f"AVISO: Não foi possível criar os índices. Eles podem já existir. Erro: {e}")
 
 # =============================================================================
 # FUNÇÕES DE PROCESSAMENTO E CARGA DE DADOS
 # =============================================================================
 
-def process_and_load_data(conn, extracted_path):
+def process_and_load_data(engine, extracted_path):
     """
     Orquestra o processo de limpeza e carga de todos os arquivos CSV no banco de dados.
     """
@@ -276,9 +275,9 @@ def process_and_load_data(conn, extracted_path):
 
     for table_name, files in file_mappings.items():
         if files:
-            process_table_files(conn, table_name, files, schemas[table_name], extracted_path)
+            process_table_files(engine, table_name, files, schemas[table_name], extracted_path)
 
-def process_table_files(conn, table_name, files, schema, extracted_path):
+def process_table_files(engine, table_name, files, schema, extracted_path):
     """Processa e carrega todos os arquivos de um tipo específico de tabela."""
     insert_start = time.time()
     print(f"\nProcessando tabela: {table_name.upper()}")
@@ -302,7 +301,7 @@ def process_table_files(conn, table_name, files, schema, extracted_path):
         )
 
         for i, chunk in enumerate(reader):
-            bulk_insert_to_sql(conn, chunk, table_name)
+            bulk_insert_to_sql(engine, chunk, table_name)
             total_chunks += 1
             print(f'\r    Chunk {i+1} do arquivo {file_name} inserido com sucesso!', end='')
 
@@ -335,16 +334,12 @@ def sanitize_file(filepath, num_expected_columns):
 
     return clean_buffer
 
-def bulk_insert_to_sql(conn, df, table_name):
-    """Insere um DataFrame em uma tabela do SQL Server usando to_sql."""
+def bulk_insert_to_sql(engine, df, table_name):
+    """Insere um DataFrame em uma tabela do SQL Server usando to_sql e um engine SQLAlchemy."""
     try:
-        # Usar um cursor temporário para a inserção
-        with conn.cursor() as cursor:
-             df.to_sql(table_name, con=conn, if_exists='append', index=False, chunksize=1000, method=None) # method=None usa o padrão do SQLAlchemy
-        conn.commit()
+        df.to_sql(table_name, con=engine, if_exists='append', index=False, chunksize=10000, method='multi')
     except Exception as error:
         print(f"\nERRO ao inserir dados na tabela {table_name}: {error}")
-        conn.rollback()
 
 def classify_files(extracted_path):
     """Classifica os arquivos extraídos em categorias de tabelas."""
@@ -410,17 +405,17 @@ def main():
     extract_zip_files(config['output_path'], config['extracted_path'])
 
     # 3. Conexão e Configuração do Banco de Dados
-    conn = get_db_connection(config)
-    setup_database_tables(conn)
+    engine = get_db_engine(config)
+    setup_database_tables(engine)
 
     # 4. Processamento e Carga dos Dados
-    process_and_load_data(conn, config['extracted_path'])
+    process_and_load_data(engine, config['extracted_path'])
 
     # 5. Otimização do Banco (Índices)
-    create_database_indexes(conn)
+    create_database_indexes(engine)
 
     # Fechar a conexão
-    conn.close()
+    engine.dispose()
 
     total_time = round(time.time() - start_time)
     print(f"\nProcesso 100% finalizado em {total_time} segundos!")
