@@ -8,7 +8,7 @@ import bs4 as bs
 import os
 import pandas as pd
 import pyodbc
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 import re
 import sys
@@ -239,8 +239,8 @@ def setup_database_tables(engine):
             with open(os.path.join(ddl_dir, ddl_file), 'r', encoding='utf-8') as f:
                 ddl_content = f.read()
 
-            connection.execute(f"IF OBJECT_ID('{table_name}', 'U') IS NOT NULL DROP TABLE {table_name};")
-            connection.execute(ddl_content)
+            connection.execute(text(f"IF OBJECT_ID('{table_name}', 'U') IS NOT NULL DROP TABLE {table_name};"))
+            connection.execute(text(ddl_content))
 
         connection.commit()
     logging.info("Tabelas configuradas com sucesso.")
