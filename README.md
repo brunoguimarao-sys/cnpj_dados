@@ -15,6 +15,7 @@ Esta versão do projeto inclui as seguintes melhorias:
 - **Uso de Memória Reduzido:** O processamento de arquivos grandes agora é feito em pedaços (`chunks`), permitindo que o ETL rode em máquinas com menos recursos de RAM.
 - **Tratamento de Erros Aprimorado:** O script agora detecta arquivos corrompidos durante a descompactação e reporta o erro, em vez de falhar silenciosamente.
 - **Configuração Simplificada:** A URL de download dos dados foi movida para o arquivo de configuração, facilitando futuras atualizações.
+- **Downloads Inteligentes:** O script verifica se um arquivo já existe localmente e compara seu tamanho com o do servidor. O download só é refeito se o arquivo for novo ou tiver sido atualizado na fonte, economizando tempo e banda.
 
 ---
 
