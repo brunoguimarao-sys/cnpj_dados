@@ -71,38 +71,40 @@ def create_tables(cursor):
     print("Criando/recriando tabelas no banco de dados conforme layout oficial...")
 
     # DDLs baseados no documento "NOVOLAYOUTDOSDADOSABERTOSDOCNPJ.pdf"
+    # DDLs com tipos de dados flexíveis (VARCHAR) para evitar erros de parsing na carga.
+    # A conversão de tipos deve ser feita posteriormente no próprio banco de dados.
     ddl_commands = {
         "empresa": """CREATE TABLE empresa (
-            cnpj_basico VARCHAR(8),
+            cnpj_basico VARCHAR,
             razao_social VARCHAR,
-            natureza_juridica INTEGER,
-            qualificacao_responsavel INTEGER,
-            capital_social FLOAT,
-            porte_empresa INTEGER,
+            natureza_juridica VARCHAR,
+            qualificacao_responsavel VARCHAR,
+            capital_social VARCHAR,
+            porte_empresa VARCHAR,
             ente_federativo_responsavel VARCHAR
         );""",
         "estabelecimento": """CREATE TABLE estabelecimento (
-            cnpj_basico VARCHAR(8),
-            cnpj_ordem VARCHAR(4),
-            cnpj_dv VARCHAR(2),
-            identificador_matriz_filial INTEGER,
+            cnpj_basico VARCHAR,
+            cnpj_ordem VARCHAR,
+            cnpj_dv VARCHAR,
+            identificador_matriz_filial VARCHAR,
             nome_fantasia VARCHAR,
-            situacao_cadastral INTEGER,
-            data_situacao_cadastral VARCHAR(8),
-            motivo_situacao_cadastral INTEGER,
+            situacao_cadastral VARCHAR,
+            data_situacao_cadastral VARCHAR,
+            motivo_situacao_cadastral VARCHAR,
             nome_cidade_exterior VARCHAR,
             pais VARCHAR,
-            data_inicio_atividade VARCHAR(8),
-            cnae_fiscal_principal INTEGER,
+            data_inicio_atividade VARCHAR,
+            cnae_fiscal_principal VARCHAR,
             cnae_fiscal_secundaria VARCHAR,
             tipo_logradouro VARCHAR,
             logradouro VARCHAR,
             numero VARCHAR,
             complemento VARCHAR,
             bairro VARCHAR,
-            cep VARCHAR(8),
-            uf VARCHAR(2),
-            municipio INTEGER,
+            cep VARCHAR,
+            uf VARCHAR,
+            municipio VARCHAR,
             ddd_1 VARCHAR,
             telefone_1 VARCHAR,
             ddd_2 VARCHAR,
@@ -111,36 +113,36 @@ def create_tables(cursor):
             fax VARCHAR,
             correio_eletronico VARCHAR,
             situacao_especial VARCHAR,
-            data_situacao_especial VARCHAR(8)
+            data_situacao_especial VARCHAR
         );""",
         "socios": """CREATE TABLE socios (
-            cnpj_basico VARCHAR(8),
-            identificador_socio INTEGER,
+            cnpj_basico VARCHAR,
+            identificador_socio VARCHAR,
             nome_socio_razao_social VARCHAR,
-            cpf_cnpj_socio VARCHAR(14),
-            qualificacao_socio INTEGER,
-            data_entrada_sociedade VARCHAR(8),
-            pais INTEGER,
-            representante_legal VARCHAR(14),
+            cpf_cnpj_socio VARCHAR,
+            qualificacao_socio VARCHAR,
+            data_entrada_sociedade VARCHAR,
+            pais VARCHAR,
+            representante_legal VARCHAR,
             nome_do_representante VARCHAR,
-            qualificacao_representante_legal INTEGER,
-            faixa_etaria INTEGER
+            qualificacao_representante_legal VARCHAR,
+            faixa_etaria VARCHAR
         );""",
         "simples": """CREATE TABLE simples (
-            cnpj_basico VARCHAR(8),
-            opcao_pelo_simples VARCHAR(1),
-            data_opcao_simples VARCHAR(8),
-            data_exclusao_simples VARCHAR(8),
-            opcao_mei VARCHAR(1),
-            data_opcao_mei VARCHAR(8),
-            data_exclusao_mei VARCHAR(8)
+            cnpj_basico VARCHAR,
+            opcao_pelo_simples VARCHAR,
+            data_opcao_simples VARCHAR,
+            data_exclusao_simples VARCHAR,
+            opcao_mei VARCHAR,
+            data_opcao_mei VARCHAR,
+            data_exclusao_mei VARCHAR
         );""",
-        "cnae": "CREATE TABLE cnae (codigo INTEGER, descricao VARCHAR);",
-        "moti": "CREATE TABLE moti (codigo INTEGER, descricao VARCHAR);",
-        "munic": "CREATE TABLE munic (codigo INTEGER, descricao VARCHAR);",
-        "natju": "CREATE TABLE natju (codigo INTEGER, descricao VARCHAR);",
-        "pais": "CREATE TABLE pais (codigo INTEGER, descricao VARCHAR);",
-        "quals": "CREATE TABLE quals (codigo INTEGER, descricao VARCHAR);"
+        "cnae": "CREATE TABLE cnae (codigo VARCHAR, descricao VARCHAR);",
+        "moti": "CREATE TABLE moti (codigo VARCHAR, descricao VARCHAR);",
+        "munic": "CREATE TABLE munic (codigo VARCHAR, descricao VARCHAR);",
+        "natju": "CREATE TABLE natju (codigo VARCHAR, descricao VARCHAR);",
+        "pais": "CREATE TABLE pais (codigo VARCHAR, descricao VARCHAR);",
+        "quals": "CREATE TABLE quals (codigo VARCHAR, descricao VARCHAR);"
     }
 
     for table_name, ddl in ddl_commands.items():
@@ -549,6 +551,48 @@ def estabelecimento_chunk_generator(filepath, chunksize):
         yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"', on_bad_lines='warn')
         buffer.close()
 
+def clean_estabelecimento_line(line, delimiter=';'):
+    """
+    Limpa uma linha do arquivo de estabelecimento, lidando com delimitadores extras.
+    Assume que os primeiros 3 campos e os 19 últimos são sempre bem formatados.
+    Os campos problemáticos (nome_fantasia, endereço) ficam no meio.
+    """
+    # Remove aspas para evitar problemas com o split
+    line_no_quotes = line.strip().replace('"', '')
+    parts = line_no_quotes.split(delimiter)
+
+    if len(parts) > 30:
+        # Heurística: os primeiros 4 campos e os últimos 19 estão corretos.
+        middle_parts = parts[4:-19]
+        reconstructed_middle = " ".join(middle_parts) # Junta o campo quebrado
+
+        # Remonta a linha com o campo do meio corrigido e entre aspas
+        corrected_parts = parts[:4] + [f'"{reconstructed_middle}"'] + parts[-19:]
+        return delimiter.join(corrected_parts) + '\n'
+    return line # Retorna a linha original se ela parece correta
+
+def estabelecimento_chunk_generator(filepath, chunksize):
+    """
+    Um gerador que lê um arquivo de estabelecimento em pedaços, limpa as linhas
+    e retorna um DataFrame do pandas para cada pedaço.
+    """
+    buffer = io.StringIO()
+    lines_in_buffer = 0
+    with open(filepath, 'r', encoding='latin-1') as f:
+        for line in f:
+            buffer.write(clean_estabelecimento_line(line))
+            lines_in_buffer += 1
+            if lines_in_buffer >= chunksize:
+                buffer.seek(0)
+                yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"')
+                buffer.close()
+                buffer = io.StringIO()
+                lines_in_buffer = 0
+    if lines_in_buffer > 0:
+        buffer.seek(0)
+        yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"')
+        buffer.close()
+
 # Arquivos de estabelecimento:
 estabelecimento_insert_start = time.time()
 print("""
@@ -571,24 +615,11 @@ for e in range(0, len(arquivos_estabelecimento)):
         'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2', 'ddd_fax', 'fax',
         'correio_eletronico', 'situacao_especial', 'data_situacao_especial'
     ]
-    est_dtypes = {col: str for col in est_cols} # Ler tudo como string para evitar erros de tipo
+    est_dtypes = {col: str for col in est_cols}
 
     extracted_file_path = os.path.join(extracted_files, arquivos_estabelecimento[e])
 
-    # Usando o leitor de CSV do pandas diretamente, mas com `on_bad_lines='warn'`
-    # para registrar linhas problemáticas em vez de falhar.
-    reader = pd.read_csv(
-        filepath_or_buffer=extracted_file_path,
-        sep=';',
-        header=None,
-        names=est_cols,
-        dtype=est_dtypes,
-        encoding='latin-1',
-        chunksize=CHUNKSIZE,
-        quotechar='"',
-        engine='python',
-        on_bad_lines='warn' # Loga linhas com o número errado de colunas
-    )
+    reader = estabelecimento_chunk_generator(extracted_file_path, CHUNKSIZE)
 
     for i, chunk in enumerate(reader):
         copy_from_stringio(cur, chunk, 'estabelecimento')
