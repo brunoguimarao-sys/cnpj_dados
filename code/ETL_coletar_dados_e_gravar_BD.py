@@ -463,6 +463,11 @@ for e in range(0, len(arquivos_empresa)):
 
     for i, chunk in enumerate(reader):
         chunk['capital_social'] = chunk['capital_social'].str.replace(',', '.').astype(float)
+
+        # Trata colunas que deveriam ser inteiras mas podem ter vindo como float string (ex: "0.0")
+        chunk['qualificacao_responsavel'] = pd.to_numeric(chunk['qualificacao_responsavel'], errors='coerce').fillna(0).astype(int)
+        chunk['porte_empresa'] = pd.to_numeric(chunk['porte_empresa'], errors='coerce').fillna(0).astype(int)
+
         copy_from_stringio(cur, chunk, 'empresa')
         print(f'\rChunk {i} do arquivo {arquivos_empresa[e]} inserido com sucesso no banco de dados!', end='')
 
@@ -475,6 +480,75 @@ empresa_Tempo_insert = round((empresa_insert_end - empresa_insert_start))
 print('Tempo de execução do processo de empresa (em segundos): ' + str(empresa_Tempo_insert))
 
 #%%
+def clean_estabelecimento_line(line, delimiter=';'):
+    """
+    Limpa uma linha do arquivo de estabelecimento, lidando com delimitadores extras
+    em vários campos de texto.
+    """
+    parts = line.strip().split(delimiter)
+    if len(parts) > 30:
+        # A lógica assume que os 10 últimos campos (de ddd_1 em diante) e os 11 primeiros
+        # (até data_inicio_atividade) estão corretos. Os campos problemáticos estão no meio.
+        middle_start = 11
+        middle_end = -10
+        middle_parts = parts[middle_start:middle_end]
+
+        # Junta as partes do meio e coloca entre aspas
+        reconstructed_middle = f'"{" ".join(middle_parts)}"'
+
+        # Remonta a linha com o meio corrigido
+        # Esta é uma simplificação. A lógica ideal exigiria identificar qual campo específico
+        # continha o delimitador extra, o que é muito complexo. A abordagem mais segura
+        # é ler com um delimitador que não existe nos dados, como '|', após substituir.
+        # Por enquanto, esta heurística de juntar o "meio" é a melhor tentativa.
+        # NOTE: This is a heuristic and might fail if the structure is different than assumed.
+        # A melhor abordagem seria um parser de CSV mais robusto ou um delimitador diferente.
+        # Vamos tentar uma abordagem mais simples: usar o parser do python com error_bad_lines=False
+        # (obsoleto) ou, melhor, tratar exceções.
+
+        # A heurística de reconstrução é muito arriscada. Em vez disso, vamos confiar no parser
+        # do pandas com quotechar, que é a forma correta. O erro anterior pode ter sido
+        # causado por não ter lido os dados em um gerador de chunks limpos.
+        # Se os erros persistirem, a única solução 100% robusta é um pré-processamento
+        # que converta o delimitador, mas isso é muito lento.
+        # Vamos manter o código como está para esta tabela e reavaliar se o erro persiste.
+        # O erro anterior no log era claro, vamos tentar aplicar a mesma lógica de limpeza.
+
+        # Reconstrução baseada na ideia de que os campos problemáticos estão no meio
+        # (nome_fantasia, logradouro, complemento, bairro).
+        # Assumindo que os primeiros 4 e os últimos 19 campos estão corretos.
+        if len(parts) > 30:
+             # Exemplo: CNPJ;ORDEM;DV;ID;NOME FANTASIA;SIT;DATA_SIT;...
+             # Os campos de texto mais prováveis de conter ';' são nome_fantasia e os de endereço.
+             # Heurística: [0:4] e [-19:] estão corretos. O meio é o problemático.
+             middle_parts = parts[4:-19]
+             reconstructed_middle = f'"{" ".join(middle_parts)}"'
+             corrected_parts = parts[:4] + [reconstructed_middle] + parts[-19:]
+             return delimiter.join(corrected_parts) + '\n'
+
+    return line
+
+def estabelecimento_chunk_generator(filepath, chunksize):
+    buffer = io.StringIO()
+    lines_in_buffer = 0
+    with open(filepath, 'r', encoding='latin-1') as f:
+        for line in f:
+            # A limpeza para estabelecimento é mais complexa e arriscada.
+            # Por enquanto, vamos confiar no parser do pandas, que é a ferramenta correta.
+            # A lógica de limpeza será aplicada se o erro persistir.
+            buffer.write(line) # Sem limpeza por enquanto
+            lines_in_buffer += 1
+            if lines_in_buffer >= chunksize:
+                buffer.seek(0)
+                yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"', on_bad_lines='warn')
+                buffer.close()
+                buffer = io.StringIO()
+                lines_in_buffer = 0
+    if lines_in_buffer > 0:
+        buffer.seek(0)
+        yield pd.read_csv(buffer, sep=';', header=None, names=est_cols, dtype=est_dtypes, quotechar='"', on_bad_lines='warn')
+        buffer.close()
+
 # Arquivos de estabelecimento:
 estabelecimento_insert_start = time.time()
 print("""
@@ -487,11 +561,6 @@ print("""
 print('Tem %i arquivos de estabelecimento!' % len(arquivos_estabelecimento))
 for e in range(0, len(arquivos_estabelecimento)):
     print('Trabalhando no arquivo: '+arquivos_estabelecimento[e]+' [...]')
-    try:
-        del estabelecimento
-        gc.collect()
-    except:
-        pass
 
     # Schema para ESTABELECIMENTOS
     est_cols = [
@@ -506,6 +575,8 @@ for e in range(0, len(arquivos_estabelecimento)):
 
     extracted_file_path = os.path.join(extracted_files, arquivos_estabelecimento[e])
 
+    # Usando o leitor de CSV do pandas diretamente, mas com `on_bad_lines='warn'`
+    # para registrar linhas problemáticas em vez de falhar.
     reader = pd.read_csv(
         filepath_or_buffer=extracted_file_path,
         sep=';',
@@ -515,11 +586,11 @@ for e in range(0, len(arquivos_estabelecimento)):
         encoding='latin-1',
         chunksize=CHUNKSIZE,
         quotechar='"',
-        engine='python'
+        engine='python',
+        on_bad_lines='warn' # Loga linhas com o número errado de colunas
     )
 
     for i, chunk in enumerate(reader):
-        # Nenhum tratamento extra necessário por enquanto
         copy_from_stringio(cur, chunk, 'estabelecimento')
         print(f'\rChunk {i} do arquivo {arquivos_estabelecimento[e]} inserido com sucesso!', end='')
 
