@@ -192,55 +192,47 @@ def bar_progress(current, total, width=80):
 # FUNÇÕES DE BANCO DE DADOS
 # =============================================================================
 
-def get_db_engine(config, db_name=None):
+def get_db_engine(config):
     """
-    Cria e retorna um engine do SQLAlchemy para o SQL Server.
-    Se db_name for None, conecta-se ao banco de dados padrão do servidor.
+    Cria e retorna um engine de conexão com o servidor SQL, conectado ao banco 'master'.
     """
-    db_to_connect = db_name if db_name else config["db_name"]
-
     connection_url = URL.create(
         "mssql+pyodbc",
         username=config["db_user"],
         password=config["db_password"],
         host=config["db_server"],
-        database=db_to_connect,
+        database="master",
         query={"driver": config["db_driver"]},
     )
-
     try:
         engine = create_engine(connection_url)
-        # Testa a conexão
         with engine.connect() as connection:
-            logging.info(f"Conexão com o SQL Server (banco: '{db_to_connect}') bem-sucedida!")
+            logging.info(f"Conexão com o servidor SQL '{config['db_server']}' (banco: master) bem-sucedida!")
         return engine
     except Exception as e:
-        # Adiciona um aviso sobre a senha se a autenticação falhar
         if 'Login failed' in str(e):
             logging.error("Falha de logon. Verifique se o usuário e a senha no seu arquivo .env estão corretos.")
         logging.error(f"Falha ao criar engine de conexão com o SQL Server. Erro: {e}")
         sys.exit(1)
 
 def prepare_database(engine, db_name):
-    """Garante que o banco de dados de destino exista e esteja limpo."""
+    """
+    Garante que o banco de dados de destino exista e esteja limpo, usando a conexão existente.
+    """
     logging.info(f"Preparando o banco de dados '{db_name}'...")
     with engine.connect() as connection:
         connection = connection.execution_options(isolation_level="AUTOCOMMIT")
         try:
-            logging.info(f"Tentando remover o banco de dados '{db_name}' se ele já existir...")
-            connection.execute(text(f"DROP DATABASE IF EXISTS [{db_name}]"))
-            logging.info("Banco de dados removido com sucesso (ou não existia).")
-        except Exception as e:
-            logging.error(f"Não foi possível remover o banco de dados '{db_name}'. Erro: {e}")
-            logging.error("Verifique as permissões do usuário e se não há conexões ativas no banco de dados.")
-            sys.exit(1)
-
-        try:
+            logging.info(f"Verificando e removendo o banco de dados '{db_name}' se ele já existir...")
+            connection.execute(text(f"IF DB_ID('{db_name}') IS NOT NULL DROP DATABASE [{db_name}]"))
             logging.info(f"Criando o banco de dados '{db_name}'...")
             connection.execute(text(f"CREATE DATABASE [{db_name}]"))
-            logging.info(f"Banco de dados '{db_name}' criado com sucesso.")
+            logging.info(f"Mudando o contexto para o banco de dados '{db_name}'...")
+            connection.execute(text(f"USE [{db_name}]"))
+            logging.info(f"Banco de dados '{db_name}' está pronto para uso.")
         except Exception as e:
-            logging.error(f"Não foi possível criar o banco de dados '{db_name}'. Erro: {e}")
+            logging.error(f"Falha ao preparar o banco de dados '{db_name}'. Erro: {e}")
+            logging.error("Verifique as permissões do usuário no servidor SQL.")
             sys.exit(1)
 
 def setup_database_tables(engine):
@@ -331,14 +323,15 @@ def process_table_files(engine, table_name, files, schema, extracted_path):
             for i, chunk in enumerate(reader):
                 bulk_insert_to_sql(engine, chunk, table_name)
                 total_rows_inserted += len(chunk)
-                logging.info(f'\r    Chunk {i+1} do arquivo {file_name} inserido com sucesso!', end='')
+                # O \r foi removido para um log mais limpo. A verbosidade excessiva foi removida.
+                # logging.info(f'    Chunk {i+1} do arquivo {file_name} inserido com sucesso.')
 
-            logging.info(f'\n  Arquivo {file_name} finalizado.')
+            logging.info(f'  Arquivo {file_name} finalizado.')
             gc.collect()
 
         except Exception as e:
             logging.error(f"Falha ao processar o arquivo {file_name}. Erro: {e}")
-            logging.warning("O arquivo será ignorado. Verifique o layout e o conteúdo do arquivo.")
+            logging.warning(f"O arquivo {file_name} será ignorado.")
             continue
 
     tempo_insert = round(time.time() - insert_start)
@@ -347,9 +340,11 @@ def process_table_files(engine, table_name, files, schema, extracted_path):
 def bulk_insert_to_sql(engine, df, table_name):
     """Insere um DataFrame em uma tabela do SQL Server usando to_sql e um engine SQLAlchemy."""
     try:
-        df.to_sql(table_name, con=engine, if_exists='append', index=False, chunksize=10000, method='multi')
+        # method=None é mais lento mas é a opção mais robusta contra erros de limite de parâmetros
+        df.to_sql(table_name, con=engine, if_exists='append', index=False, chunksize=10_000, method=None)
     except Exception as error:
         logging.error(f"Erro ao inserir dados na tabela {table_name}: {error}")
+        # Decide-se não parar o processo inteiro, mas registrar o erro de inserção do chunk.
 
 def classify_files(extracted_path):
     """Classifica os arquivos extraídos em categorias de tabelas."""
@@ -423,24 +418,19 @@ def main():
     extract_zip_files(config['output_path'], config['extracted_path'])
 
     # 3. Conexão e Configuração do Banco de Dados
-    logging.info("Conectando ao servidor SQL para preparar o banco de dados...")
-    master_engine = get_db_engine(config, db_name='master')
-    prepare_database(master_engine, db_name)
-    master_engine.dispose()
+    engine = get_db_engine(config)
+    prepare_database(engine, db_name)
 
-    logging.info(f"Conectando ao banco de dados '{db_name}' recém-criado...")
-    target_engine = get_db_engine(config, db_name=db_name)
-
-    setup_database_tables(target_engine)
+    setup_database_tables(engine)
 
     # 4. Processamento e Carga dos Dados
-    process_and_load_data(target_engine, config['extracted_path'])
+    process_and_load_data(engine, config['extracted_path'])
 
     # 5. Otimização do Banco (Índices)
-    create_database_indexes(target_engine)
+    create_database_indexes(engine)
 
     # Fechar a conexão
-    target_engine.dispose()
+    engine.dispose()
 
     total_time = round(time.time() - start_time)
     logging.info(f"--- PROCESSO 100% FINALIZADO EM {total_time} SEGUNDOS! ---")
