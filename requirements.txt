@@ -18,4 +18,3 @@ wget>=3.2
 zipp>=3.4.1
 pyodbc
 sqlalchemy
-sqlalchemy-pyodbc
