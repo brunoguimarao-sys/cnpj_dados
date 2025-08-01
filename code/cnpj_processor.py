@@ -192,22 +192,27 @@ def bar_progress(current, total, width=80):
 # FUNÇÕES DE BANCO DE DADOS
 # =============================================================================
 
-def get_db_engine(config):
+def get_db_engine(config, db_name=None):
     """
-    Cria e retorna um engine de conexão com o servidor SQL, conectado ao banco 'master'.
+    Cria e retorna um engine do SQLAlchemy para o SQL Server.
+    Se 'db_name' é None, usa o banco de dados padrão do servidor (geralmente 'master').
     """
+    # Se db_name não for fornecido, não especifica um banco de dados na URL,
+    # conectando-se ao padrão do servidor (master).
     connection_url = URL.create(
         "mssql+pyodbc",
         username=config["db_user"],
         password=config["db_password"],
         host=config["db_server"],
-        database="master",
+        database=db_name,
         query={"driver": config["db_driver"]},
     )
     try:
         engine = create_engine(connection_url)
+        # Apenas para teste de conexão, não deixa a conexão aberta.
         with engine.connect() as connection:
-            logging.info(f"Conexão com o servidor SQL '{config['db_server']}' (banco: master) bem-sucedida!")
+            db_context = db_name if db_name else 'master'
+            logging.info(f"Conexão com o servidor SQL '{config['db_server']}' (banco: {db_context}) bem-sucedida!")
         return engine
     except Exception as e:
         if 'Login failed' in str(e):
@@ -215,21 +220,20 @@ def get_db_engine(config):
         logging.error(f"Falha ao criar engine de conexão com o SQL Server. Erro: {e}")
         sys.exit(1)
 
-def prepare_database(engine, db_name):
+def prepare_database(master_engine, db_name):
     """
-    Garante que o banco de dados de destino exista e esteja limpo, usando a conexão existente.
+    Garante que o banco de dados de destino exista e esteja limpo.
+    Usa um engine conectado ao 'master' para realizar as operações de DROP e CREATE.
     """
     logging.info(f"Preparando o banco de dados '{db_name}'...")
-    with engine.connect() as connection:
+    with master_engine.connect() as connection:
         connection = connection.execution_options(isolation_level="AUTOCOMMIT")
         try:
-            logging.info(f"Verificando e removendo o banco de dados '{db_name}' se ele já existir...")
-            connection.execute(text(f"IF DB_ID('{db_name}') IS NOT NULL DROP DATABASE [{db_name}]"))
+            logging.info(f"Removendo o banco de dados '{db_name}' se ele existir...")
+            connection.execute(text(f"DROP DATABASE IF EXISTS [{db_name}]"))
             logging.info(f"Criando o banco de dados '{db_name}'...")
             connection.execute(text(f"CREATE DATABASE [{db_name}]"))
-            logging.info(f"Mudando o contexto para o banco de dados '{db_name}'...")
-            connection.execute(text(f"USE [{db_name}]"))
-            logging.info(f"Banco de dados '{db_name}' está pronto para uso.")
+            logging.info(f"Banco de dados '{db_name}' criado com sucesso.")
         except Exception as e:
             logging.error(f"Falha ao preparar o banco de dados '{db_name}'. Erro: {e}")
             logging.error("Verifique as permissões do usuário no servidor SQL.")
@@ -418,19 +422,28 @@ def main():
     extract_zip_files(config['output_path'], config['extracted_path'])
 
     # 3. Conexão e Configuração do Banco de Dados
-    engine = get_db_engine(config)
-    prepare_database(engine, db_name)
+    logging.info("Iniciando preparação do banco de dados...")
+    master_engine = get_db_engine(config, db_name='master')
+    prepare_database(master_engine, db_name)
+    master_engine.dispose() # Descarta o engine do master
+    logging.info("Preparação do banco de dados finalizada.")
 
-    setup_database_tables(engine)
+    # Cria um novo engine conectado diretamente ao banco de dados de destino
+    logging.info(f"Criando nova conexão para o banco de dados '{db_name}'...")
+    target_engine = get_db_engine(config, db_name=db_name)
 
-    # 4. Processamento e Carga dos Dados
-    process_and_load_data(engine, config['extracted_path'])
+    try:
+        setup_database_tables(target_engine)
 
-    # 5. Otimização do Banco (Índices)
-    create_database_indexes(engine)
+        # 4. Processamento e Carga dos Dados
+        process_and_load_data(target_engine, config['extracted_path'])
 
-    # Fechar a conexão
-    engine.dispose()
+        # 5. Otimização do Banco (Índices)
+        create_database_indexes(target_engine)
+    finally:
+        # Garante que a conexão final seja fechada
+        logging.info("Fechando conexão com o banco de dados de destino.")
+        target_engine.dispose()
 
     total_time = round(time.time() - start_time)
     logging.info(f"--- PROCESSO 100% FINALIZADO EM {total_time} SEGUNDOS! ---")
